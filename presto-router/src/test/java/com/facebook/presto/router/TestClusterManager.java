@@ -28,6 +28,7 @@ import com.facebook.presto.router.cluster.ClusterManager;
 import com.facebook.presto.router.cluster.ClusterManager.ClusterStatusTracker;
 import com.facebook.presto.router.cluster.RemoteInfoFactory;
 import com.facebook.presto.router.cluster.RemoteStateConfig;
+import com.facebook.presto.router.scheduler.CustomSchedulerManager;
 import com.facebook.presto.router.spec.RouterSpec;
 import com.facebook.presto.server.testing.TestingPrestoServer;
 import com.facebook.presto.tpch.TpchPlugin;
@@ -39,11 +40,9 @@ import org.testng.annotations.Test;
 
 import java.io.File;
 import java.io.IOException;
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -53,9 +52,9 @@ import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeoutException;
 
+import static com.facebook.presto.router.TestingRouterUtil.createConnection;
 import static com.facebook.presto.router.TestingRouterUtil.getConfigFile;
 import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
-import static java.lang.String.format;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
@@ -73,6 +72,7 @@ public class TestClusterManager
     private File configFile;
     private RemoteInfoFactory remoteInfoFactory;
     private RemoteStateConfig remoteStateConfig;
+    private CustomSchedulerManager schedulerManager;
 
     @BeforeClass
     public void setup()
@@ -94,7 +94,7 @@ public class TestClusterManager
                 new TestingHttpServerModule(),
                 new JsonModule(),
                 new JaxrsModule(true),
-                new RouterModule());
+                new RouterModule(Optional.empty()));
 
         Injector injector = app.doNotInitializeLogging()
                 .setRequiredConfigurationProperty("router.config-file", configFile.getAbsolutePath())
@@ -103,6 +103,7 @@ public class TestClusterManager
         lifeCycleManager = injector.getInstance(LifeCycleManager.class);
         httpServerInfo = injector.getInstance(HttpServerInfo.class);
         clusterStatusTracker = injector.getInstance(ClusterStatusTracker.class);
+        schedulerManager = injector.getInstance(CustomSchedulerManager.class);
 
         // Store dependencies for later use
         remoteInfoFactory = injector.getInstance(RemoteInfoFactory.class);
@@ -153,7 +154,7 @@ public class TestClusterManager
         newRouterConfig.setConfigFile(newConfig.getAbsolutePath());
 
         CyclicBarrier barrier = new CyclicBarrier(2);
-        ClusterManager barrierClusterManager = new BarrierClusterManager(newRouterConfig, remoteInfoFactory, barrier, lifeCycleManager);
+        ClusterManager barrierClusterManager = new BarrierClusterManager(newRouterConfig, remoteInfoFactory, barrier, lifeCycleManager, schedulerManager);
         assertEquals(barrierClusterManager.getAllClusters().size(), 3);
 
         while (!barrierClusterManager.getIsWatchServiceStarted()) {
@@ -211,12 +212,5 @@ public class TestClusterManager
         server.refreshNodes();
 
         return server;
-    }
-
-    private static Connection createConnection(URI uri)
-            throws SQLException
-    {
-        String url = format("jdbc:presto://%s:%s", uri.getHost(), uri.getPort());
-        return DriverManager.getConnection(url, "test", null);
     }
 }

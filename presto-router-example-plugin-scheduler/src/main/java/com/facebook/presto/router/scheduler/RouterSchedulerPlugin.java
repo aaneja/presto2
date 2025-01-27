@@ -13,12 +13,20 @@
  */
 package com.facebook.presto.router.scheduler;
 
-public enum SchedulerType
+import com.facebook.presto.spi.RouterPlugin;
+import com.facebook.presto.spi.router.SchedulerFactory;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class RouterSchedulerPlugin
+        implements RouterPlugin
 {
-    RANDOM_CHOICE,
-    ROUND_ROBIN,
-    USER_HASH,
-    WEIGHTED_RANDOM_CHOICE,
-    WEIGHTED_ROUND_ROBIN,
-    CUSTOM_PLUGIN_SCHEDULER
+    @Override
+    public Iterable<SchedulerFactory> getSchedulerFactories()
+    {
+        List<SchedulerFactory> schedulerFactories = new ArrayList<>();
+        schedulerFactories.add(new MetricsBasedSchedulerFactory());
+        return schedulerFactories;
+    }
 }
