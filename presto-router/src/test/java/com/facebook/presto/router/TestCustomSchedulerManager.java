@@ -187,7 +187,7 @@ public class TestCustomSchedulerManager
     public void testQuery()
             throws Exception
     {
-        TestingRouterUtil.testQuery(httpServerInfo);
+        TestClusterManager.runAndAsserQueryResults(httpServerInfo);
 
         MockScheduler mockScheduler = (MockScheduler) schedulerManager.getScheduler();
         assertEquals(mockScheduler.getRequestsMade(), 1);

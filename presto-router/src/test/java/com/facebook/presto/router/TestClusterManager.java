@@ -123,25 +123,32 @@ public class TestClusterManager
     public void testQuery()
             throws Exception
     {
-        String sql = "SELECT row_number() OVER () n FROM tpch.tiny.orders";
         for (int i = 0; i < NUM_QUERIES; ++i) {
-            try (Connection connection = createConnection(httpServerInfo.getHttpUri());
-                    Statement statement = connection.createStatement();
-                    ResultSet rs = statement.executeQuery(sql)) {
-                long count = 0;
-                long sum = 0;
-                while (rs.next()) {
-                    count++;
-                    sum += rs.getLong("n");
-                }
-                assertEquals(count, 15000);
-                assertEquals(sum, (count / 2) * (1 + count));
-            }
+            runAndAsserQueryResults(httpServerInfo);
         }
 
         sleepUninterruptibly(10, SECONDS);
         assertEquals(clusterStatusTracker.getAllQueryInfos().size(), NUM_QUERIES);
         assertQueryState();
+    }
+
+    static void runAndAsserQueryResults(HttpServerInfo httpServerInfo)
+            throws SQLException
+    {
+        String sql = "SELECT row_number() OVER () n FROM tpch.tiny.orders";
+
+        try (Connection connection = createConnection(httpServerInfo.getHttpUri());
+                Statement statement = connection.createStatement();
+                ResultSet rs = statement.executeQuery(sql)) {
+            long count = 0;
+            long sum = 0;
+            while (rs.next()) {
+                count++;
+                sum += rs.getLong("n");
+            }
+            assertEquals(count, 15000);
+            assertEquals(sum, (count / 2) * (1 + count));
+        }
     }
 
     public void testConfigReload()
