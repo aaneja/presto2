@@ -37,6 +37,8 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import javax.servlet.http.HttpServletRequest;
+
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
@@ -63,6 +65,7 @@ public class TestCustomSchedulerManager
     private CustomSchedulerManager schedulerManager;
     private static List<URI> serverURIs;
     private static Path tempPluginSchedulerConfigFile;
+
     @BeforeClass
     public void setup()
             throws Exception
@@ -142,7 +145,7 @@ public class TestCustomSchedulerManager
         }
 
         @Override
-        public Optional<URI> getDestination(String user, String query)
+        public Optional<URI> getDestination(String user, String query, HttpServletRequest httpServletRequest)
         {
             ++requestsMade;
             return Optional.of(candidates.get(0));
@@ -203,14 +206,14 @@ public class TestCustomSchedulerManager
         Scheduler scheduler = schedulerManager.getScheduler();
         scheduler.setCandidates(serverURIs);
 
-        URI target = scheduler.getDestination("test", null).orElse(new URI("invalid"));
+        URI target = scheduler.getDestination("test").orElse(new URI("invalid"));
         assertTrue(serverURIs.contains(target));
     }
 
     @DataProvider(name = "schedulerNameProvider")
     public Object[][] schedulerNameProvider()
     {
-        return new Object[][]{
+        return new Object[][] {
                 {"router-scheduler.name=RANDOM"},
                 {"router-scheduler.name=METRICS"},
                 {"router-scheduler.name=MOCK"}

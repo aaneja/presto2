@@ -12,6 +12,7 @@
  * limitations under the License.
  */
 package com.facebook.presto.spi.router;
+import javax.servlet.http.HttpServletRequest;
 
 import java.net.URI;
 import java.util.List;
@@ -55,4 +56,8 @@ public interface Scheduler
      * Sets the weights of candidates with a hash map object.
      */
     default void setWeights(Map<URI, Integer> weights) {}
+
+    default Optional<List<String>> getExtraClientTags(String statement, HttpServletRequest httpServletRequest) {
+        return Optional.empty();
+    }
 }
