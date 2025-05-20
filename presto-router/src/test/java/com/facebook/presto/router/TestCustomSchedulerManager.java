@@ -145,7 +145,7 @@ public class TestCustomSchedulerManager
         }
 
         @Override
-        public Optional<URI> getDestination(String user, String query, HttpServletRequest httpServletRequest)
+        public Optional<URI> getDestination(String user, String query)
         {
             ++requestsMade;
             return Optional.of(candidates.get(0));
