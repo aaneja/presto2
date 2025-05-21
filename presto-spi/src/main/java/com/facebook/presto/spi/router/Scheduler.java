@@ -38,6 +38,21 @@ public interface Scheduler
     };
 
     /**
+     * A `getDestination` variant that allows a custom scheduler to modify the inbound {@link RequestInfo} object
+     * as it sees fit.
+     * The URI routed to is obtained from the {@link RequestInfo#getServletRequest().getRequestURI()} object.
+     *
+     * As an example, the custom scheduler could modify the request headers such as PRESTO_CLIENT_TAGS and have the request
+     * re-routed back to the router, so that the request can be routed around in a chained manner
+     *
+     * This was also a follow-up item from https://github.com/prestodb/presto/pull/24439#discussion_r2063267082
+     */
+    default Optional<RequestInfo> getDestination(RequestInfo inboundRequestInfo)
+    {
+        return Optional.empty();
+    }
+
+    /**
      * Sets the candidates with the list of URIs for scheduling.
      */
     void setCandidates(List<URI> candidates);
