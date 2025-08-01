@@ -30,7 +30,8 @@ public class ExplainType
         LOGICAL,
         DISTRIBUTED,
         VALIDATE,
-        IO
+        IO,
+        SUBSTRAIT
     }
 
     private final Type type;

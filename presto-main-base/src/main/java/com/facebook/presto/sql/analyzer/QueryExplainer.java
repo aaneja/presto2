@@ -141,6 +141,8 @@ public class QueryExplainer
                 return PlanPrinter.textDistributedPlan(subPlan, metadata.getFunctionAndTypeManager(), session, verbose);
             case IO:
                 return IOPlanPrinter.textIOPlan(getLogicalPlan(session, statement, parameters, warningCollector, query).getRoot(), metadata, session);
+            case SUBSTRAIT:
+                throw new PrestoException(NOT_SUPPORTED, "Substrait plans are not supported in this version of Presto");
         }
         throw new IllegalArgumentException("Unhandled plan type: " + planType);
     }
@@ -188,6 +190,9 @@ public class QueryExplainer
             case DISTRIBUTED:
                 SubPlan subPlan = getDistributedPlan(session, statement, parameters, warningCollector, query);
                 return jsonDistributedPlan(subPlan, metadata.getFunctionAndTypeManager(), session);
+            case SUBSTRAIT:
+                plan = getLogicalPlan(session, statement, parameters, warningCollector, query);
+                return SubstraitPlan.buildSubstraitPlan(plan, metadata, session);
             default:
                 throw new PrestoException(NOT_SUPPORTED, format("Unsupported explain plan type %s for JSON format", planType));
         }
