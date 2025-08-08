@@ -1164,6 +1164,8 @@ class AstBuilder
                 return new ExplainType(getLocation(context), ExplainType.Type.VALIDATE);
             case SqlBaseLexer.IO:
                 return new ExplainType(getLocation(context), ExplainType.Type.IO);
+            case SqlBaseLexer.SUBSTRAIT:
+                return new ExplainType(getLocation(context), ExplainType.Type.SUBSTRAIT);
         }
 
         throw new IllegalArgumentException("Unsupported EXPLAIN type: " + context.value.getText());

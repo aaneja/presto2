@@ -570,7 +570,7 @@ updateAssignment
 
 explainOption
     : FORMAT value=(TEXT | GRAPHVIZ | JSON)                 #explainFormat
-    | TYPE value=(LOGICAL | DISTRIBUTED | VALIDATE | IO)    #explainType
+    | TYPE value=(LOGICAL | DISTRIBUTED | VALIDATE | IO | SUBSTRAIT)    #explainType
     ;
 
 transactionMode
@@ -892,6 +892,7 @@ SQL: 'SQL';
 START: 'START';
 STATS: 'STATS';
 SUBSTRING: 'SUBSTRING';
+SUBSTRAIT: 'SUBSTRAIT';
 SYSTEM: 'SYSTEM';
 SYSTEM_TIME: 'SYSTEM_TIME';
 SYSTEM_VERSION: 'SYSTEM_VERSION';

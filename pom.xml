@@ -64,7 +64,7 @@
         <dep.asm.version>9.7.1</dep.asm.version>
         <dep.gcs.version>1.9.17</dep.gcs.version>
         <dep.alluxio.version>313</dep.alluxio.version>
-        <dep.slf4j.version>2.0.16</dep.slf4j.version>
+        <dep.slf4j.version>2.0.13</dep.slf4j.version>
         <dep.kafka.version>3.9.1</dep.kafka.version>
         <dep.pinot.version>1.3.0</dep.pinot.version>
         <dep.druid.version>30.0.1</dep.druid.version>
