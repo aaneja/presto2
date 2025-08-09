@@ -89,7 +89,7 @@ public class SubstraitRowExpressionVisitor
     @Override
     public Expression visitInputReference(InputReferenceExpression input, Map<VariableReferenceExpression, FieldReference> context)
     {
-        throw new UnsupportedOperationException("Cant InputReferenceExpression to expression");
+        throw new UnsupportedOperationException("Cant convert InputReferenceExpression to expression");
     }
 
     @Override
@@ -132,7 +132,7 @@ public class SubstraitRowExpressionVisitor
             return b.subtract(left, right);
         }
 
-        throw new UnsupportedOperationException("Cant CallExpression to expression");
+        throw new UnsupportedOperationException("Cant convert CallExpression to expression");
     }
 
     @Override
@@ -154,7 +154,7 @@ public class SubstraitRowExpressionVisitor
     @Override
     public Expression visitLambda(LambdaDefinitionExpression lambda, Map<VariableReferenceExpression, FieldReference> context)
     {
-        throw new UnsupportedOperationException("Cant LambdaDefinitionExpression to expression");
+        throw new UnsupportedOperationException("Cant convert LambdaDefinitionExpression to expression");
     }
 
     @Override
