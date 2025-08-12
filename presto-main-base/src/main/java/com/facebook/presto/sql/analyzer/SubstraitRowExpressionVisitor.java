@@ -132,7 +132,48 @@ public class SubstraitRowExpressionVisitor
             return b.subtract(left, right);
         }
 
-        throw new UnsupportedOperationException("Cant convert CallExpression to expression");
+        // Comparison functions from https://github.com/substrait-io/substrait/blob/2d8b1b673718df3deb9deae73de1f53dedba75f1/extensions/functions_comparison.yaml
+        if (callName.equals(OperatorType.GREATER_THAN.getFunctionName())) {
+            if (call.getArguments().size() != 2) {
+                throw new IllegalArgumentException("GREATER_THAN function must have exactly two arguments: " + call);
+            }
+
+            Expression left = call.getArguments().get(0).accept(this, context);
+            Expression right = call.getArguments().get(1).accept(this, context);
+            return scalarFn(DefaultExtensionCatalog.FUNCTIONS_COMPARISON, "gt:any_any", R.BOOLEAN, left, right);
+        }
+
+        if (callName.equals(OperatorType.GREATER_THAN_OR_EQUAL.getFunctionName())) {
+            if (call.getArguments().size() != 2) {
+                throw new IllegalArgumentException("GREATER_THAN_OR_EQUAL function must have exactly two arguments: " + call);
+            }
+
+            Expression left = call.getArguments().get(0).accept(this, context);
+            Expression right = call.getArguments().get(1).accept(this, context);
+            return scalarFn(DefaultExtensionCatalog.FUNCTIONS_COMPARISON, "gte:any_any", R.BOOLEAN, left, right);
+        }
+
+        if (callName.equals(OperatorType.LESS_THAN.getFunctionName())) {
+            if (call.getArguments().size() != 2) {
+                throw new IllegalArgumentException("LESS_THAN function must have exactly two arguments: " + call);
+            }
+
+            Expression left = call.getArguments().get(0).accept(this, context);
+            Expression right = call.getArguments().get(1).accept(this, context);
+            return scalarFn(DefaultExtensionCatalog.FUNCTIONS_COMPARISON, "lt:any_any", R.BOOLEAN, left, right);
+        }
+
+        if (callName.equals(OperatorType.LESS_THAN_OR_EQUAL.getFunctionName())) {
+            if (call.getArguments().size() != 2) {
+                throw new IllegalArgumentException("LESS_THAN function must have exactly two arguments: " + call);
+            }
+
+            Expression left = call.getArguments().get(0).accept(this, context);
+            Expression right = call.getArguments().get(1).accept(this, context);
+            return scalarFn(DefaultExtensionCatalog.FUNCTIONS_COMPARISON, "lte:any_any", R.BOOLEAN, left, right);
+        }
+
+        throw new UnsupportedOperationException(String.format("Cant convert CallExpression to expression : %s", call));
     }
 
     @Override
