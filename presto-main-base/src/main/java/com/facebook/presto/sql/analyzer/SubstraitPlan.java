@@ -17,11 +17,14 @@ import com.facebook.presto.Session;
 import com.facebook.presto.common.type.DecimalType;
 import com.facebook.presto.common.type.StandardTypes;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.plan.EquiJoinClause;
 import com.facebook.presto.spi.plan.FilterNode;
+import com.facebook.presto.spi.plan.JoinNode;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.plan.TableScanNode;
@@ -29,6 +32,7 @@ import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.Plan;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
+import com.facebook.presto.sql.relational.FunctionResolution;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -41,6 +45,7 @@ import io.substrait.extension.SimpleExtension;
 import io.substrait.plan.ImmutablePlan;
 import io.substrait.plan.PlanProtoConverter;
 import io.substrait.relation.ExtensionSingle;
+import io.substrait.relation.Join;
 import io.substrait.relation.ProtoRelConverter;
 import io.substrait.relation.Rel;
 import io.substrait.relation.RelProtoConverter;
@@ -53,6 +58,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
+import static com.facebook.presto.expressions.LogicalRowExpressions.and;
+
 public class SubstraitPlan
 {
     private static final SimpleExtension.ExtensionCollection defaultExtensionCollection = SimpleExtension.loadDefaults();
@@ -61,11 +69,10 @@ public class SubstraitPlan
     protected static SubstraitBuilder b = new SubstraitBuilder(defaultExtensionCollection);
     protected ExtensionCollector functionCollector = new ExtensionCollector();
     protected RelProtoConverter relProtoConverter = new RelProtoConverter(functionCollector);
-    protected ProtoRelConverter protoRelConverter =
-            new ProtoRelConverter(functionCollector, defaultExtensionCollection);
+    protected ProtoRelConverter protoRelConverter = new ProtoRelConverter(functionCollector, defaultExtensionCollection);
 
     /**
-     * Build a Subtrait PROTOJSON plan from a Presto plan
+     * Build a Subtrait PROTOJSON plan from a parsed Presto plan
      *
      * @param plan
      * @param metadata
@@ -79,7 +86,7 @@ public class SubstraitPlan
         io.substrait.proto.PlanOrBuilder protoPlan = planToProto.toProto(builder.build());
         try {
             StringBuilder sb = new StringBuilder();
-            TextFormat.printer().print(protoPlan, sb);
+            TextFormat.printer().print(protoPlan, sb); // A JsonFormat printer would also work
             return sb.toString();
         }
         catch (IOException e) {
@@ -99,20 +106,28 @@ public class SubstraitPlan
     {
         private final Metadata metadata;
         private final Session session;
-        private final FunctionAndTypeManager functionAndTypeManager;
         private final SubstraitRowExpressionVisitor substraitRowExpressionVisitor;
+        private final LogicalRowExpressions logicalRowExpressions;
 
         public Visitor(Metadata metadata, Session session)
         {
             this.metadata = metadata;
             this.session = session;
-            functionAndTypeManager = metadata.getFunctionAndTypeManager();
-            substraitRowExpressionVisitor = new SubstraitRowExpressionVisitor(functionAndTypeManager.getFunctionAndTypeResolver());
+            FunctionAndTypeManager functionAndTypeManager = metadata.getFunctionAndTypeManager();
+
+            substraitRowExpressionVisitor = new SubstraitRowExpressionVisitor(functionAndTypeManager);
+            // Assume all expressions are deterministic by default
+            // TODO : Plumb in a DeterminismEvaluator to check if the expression is deterministic
+            logicalRowExpressions = new LogicalRowExpressions(expression -> true,
+                    new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver())
+                    , functionAndTypeManager);
+
         }
 
         /**
-         * Convert Presto type to Substrait type
+         * Convert a Presto type to Substrait type
          * See https://substrait.io/types/type_system/
+         * This will need to be extended to support all Presto types
          *
          * @param type
          * @return
@@ -143,7 +158,7 @@ public class SubstraitPlan
 
         /**
          * Get a map of the output variables of a PlanNode to the FieldReferences
-         * There is an in-order 1:1 mapping between the output variables of a PlanNode and the sourceRel
+         * There is an in-order 1:1 mapping between the output variables of a PlanNode and the sourceRel's field references
          *
          * @param node
          * @return
@@ -156,6 +171,11 @@ public class SubstraitPlan
                 builder.put(node.getOutputVariables().get(i), b.fieldReference(nodeAsRel, i));
             }
             return builder.build();
+        }
+
+        private Expression toSubstraitExpression(RowExpression rowExpression, Map<VariableReferenceExpression, FieldReference> variableScopeMap)
+        {
+            return rowExpression.accept(substraitRowExpressionVisitor, variableScopeMap);
         }
 
         @Override
@@ -215,11 +235,6 @@ public class SubstraitPlan
                     sourceRel);
         }
 
-        private Expression toSubstraitExpression(RowExpression rowExpression, Map<VariableReferenceExpression, FieldReference> variableScopeMap)
-        {
-            return rowExpression.accept(substraitRowExpressionVisitor, variableScopeMap);
-        }
-
         @Override
         public Rel visitTableScan(TableScanNode node, Void context)
         {
@@ -228,7 +243,8 @@ public class SubstraitPlan
             Map<ColumnHandle, String> columnHandleToColumnNameMap = metadata.getColumnHandles(session, tableHandle).entrySet().stream()
                     .collect(ImmutableMap.toImmutableMap(Map.Entry::getValue, Map.Entry::getKey));
 
-            // Buid a in-order of outputvariables list of column names that we read from the TableScanNode
+            // Build a list of column names that we read from the TableScanNode, in *exact* order of outputvariables
+            // These become this Rel node's field references
             List<String> readColumns = node.getOutputVariables().stream()
                     .map(v -> Objects.requireNonNull(columnHandleToColumnNameMap.get(assignments.get(v))))
                     .collect(ImmutableList.toImmutableList());
@@ -244,6 +260,54 @@ public class SubstraitPlan
                     Collections.singletonList(tableHandle.toString()),
                     readColumns,
                     columnTypes);
+        }
+
+        @Override
+        public Rel visitJoin(JoinNode node, Void context)
+        {
+            Rel leftRel = node.getLeft().accept(this, context);
+            Rel rightRel = node.getRight().accept(this, context);
+
+            Join.JoinType joinType;
+            switch(node.getType()) {
+                case INNER:
+                    joinType = Join.JoinType.INNER;
+                    break;
+                case LEFT:
+                    joinType = Join.JoinType.LEFT;
+                    break;
+                case RIGHT:
+                    joinType = Join.JoinType.RIGHT;
+                    break;
+                case FULL:
+                    joinType = Join.JoinType.OUTER;
+                    break;
+                default:
+                    throw new UnsupportedOperationException("Unsupported join type: " + node.getType());
+            }
+
+            EquiJoinClause firstCriteria = node.getCriteria().get(0);
+            RowExpression equiJoinFilter = logicalRowExpressions.equalsCallExpression(firstCriteria.getLeft(), firstCriteria.getRight());
+            List<EquiJoinClause> nodeCriteria = node.getCriteria();
+            for (int i = 1; i < nodeCriteria.size(); i++) {
+                EquiJoinClause criteria = nodeCriteria.get(i);
+                equiJoinFilter = and(equiJoinFilter, logicalRowExpressions.equalsCallExpression(criteria.getLeft(), criteria.getRight()));
+            }
+
+            if (node.getFilter().isPresent() && !node.getFilter().get().equals(TRUE_CONSTANT)) {
+                equiJoinFilter = and(equiJoinFilter, node.getFilter().get());
+            }
+
+            ImmutableMap.Builder<VariableReferenceExpression, FieldReference> variablesToFieldRefs = ImmutableMap.builder();
+            variablesToFieldRefs.putAll(getNodeOutputToFieldRefMap(node.getLeft(), leftRel));
+            variablesToFieldRefs.putAll(getNodeOutputToFieldRefMap(node.getRight(), rightRel));
+
+            Expression joinExpression = toSubstraitExpression(equiJoinFilter, variablesToFieldRefs.build());
+
+            return b.join(joinInput-> joinExpression,
+                    joinType,
+                    leftRel,
+                    rightRel);
         }
     }
 }

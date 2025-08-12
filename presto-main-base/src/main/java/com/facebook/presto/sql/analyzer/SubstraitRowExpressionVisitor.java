@@ -21,6 +21,7 @@ import com.facebook.presto.common.type.IntegerType;
 import com.facebook.presto.common.type.SmallintType;
 import com.facebook.presto.common.type.TinyintType;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.InputReferenceExpression;
@@ -53,9 +54,9 @@ public class SubstraitRowExpressionVisitor
     private final FunctionResolution functionResolution;
     protected SubstraitBuilder b = new SubstraitBuilder(defaultExtensionCollection);
 
-    public SubstraitRowExpressionVisitor(FunctionAndTypeResolver functionAndTypeResolver)
+    public SubstraitRowExpressionVisitor(FunctionAndTypeManager functionAndTypeManager)
     {
-        this.functionAndTypeResolver = functionAndTypeResolver;
+        this.functionAndTypeResolver = functionAndTypeManager.getFunctionAndTypeResolver();
         functionResolution = new FunctionResolution(functionAndTypeResolver);
     }
 
@@ -206,6 +207,12 @@ public class SubstraitRowExpressionVisitor
                 return and(specialForm.getArguments().stream().map(arg -> arg.accept(this, context)).toArray(Expression[]::new));
             case OR:
                 return b.or(specialForm.getArguments().stream().map(arg -> arg.accept(this, context)).toArray(Expression[]::new));
+            case IS_NULL:
+                if (specialForm.getArguments().size() != 1) {
+                    throw new IllegalArgumentException("IS_NULL must have exactly one argument: " + specialForm);
+                }
+                Expression arg = specialForm.getArguments().get(0).accept(this, context);
+                return scalarFn(DefaultExtensionCatalog.FUNCTIONS_COMPARISON, "is_null:any", R.BOOLEAN, arg);
             default:
                 throw new UnsupportedOperationException(format("Unsupported special form: %s in expression: %s",
                         specialForm.getForm(), specialForm));
