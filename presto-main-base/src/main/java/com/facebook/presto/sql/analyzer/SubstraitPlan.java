@@ -31,6 +31,7 @@ import com.facebook.presto.spi.plan.TableScanNode;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.planner.Plan;
+import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.InternalPlanVisitor;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.google.common.base.Preconditions;
@@ -121,7 +122,6 @@ public class SubstraitPlan
             logicalRowExpressions = new LogicalRowExpressions(expression -> true,
                     new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver())
                     , functionAndTypeManager);
-
         }
 
         /**
@@ -269,7 +269,7 @@ public class SubstraitPlan
             Rel rightRel = node.getRight().accept(this, context);
 
             Join.JoinType joinType;
-            switch(node.getType()) {
+            switch (node.getType()) {
                 case INNER:
                     joinType = Join.JoinType.INNER;
                     break;
@@ -304,10 +304,18 @@ public class SubstraitPlan
 
             Expression joinExpression = toSubstraitExpression(equiJoinFilter, variablesToFieldRefs.build());
 
-            return b.join(joinInput-> joinExpression,
+            return b.join(joinInput -> joinExpression,
                     joinType,
                     leftRel,
                     rightRel);
+        }
+
+        @Override
+        public Rel visitExchange(ExchangeNode node, Void context)
+        {
+            return new SubstraitExchangePOJORel(
+                    node.getSources().get(0).accept(this, context),
+                    node.getType()).getAsRel();
         }
     }
 }
