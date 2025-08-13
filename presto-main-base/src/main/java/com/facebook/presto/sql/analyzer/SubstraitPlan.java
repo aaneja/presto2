@@ -37,7 +37,9 @@ import com.facebook.presto.sql.relational.FunctionResolution;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.protobuf.TextFormat;
+import com.google.protobuf.Empty;
+import com.google.protobuf.StringValue;
+import com.google.protobuf.util.JsonFormat;
 import io.substrait.dsl.SubstraitBuilder;
 import io.substrait.expression.Expression;
 import io.substrait.expression.FieldReference;
@@ -45,6 +47,7 @@ import io.substrait.extension.ExtensionCollector;
 import io.substrait.extension.SimpleExtension;
 import io.substrait.plan.ImmutablePlan;
 import io.substrait.plan.PlanProtoConverter;
+import io.substrait.proto.PlanOrBuilder;
 import io.substrait.relation.ExtensionSingle;
 import io.substrait.relation.Join;
 import io.substrait.relation.ProtoRelConverter;
@@ -87,12 +90,28 @@ public class SubstraitPlan
         io.substrait.proto.PlanOrBuilder protoPlan = planToProto.toProto(builder.build());
         try {
             StringBuilder sb = new StringBuilder();
-            TextFormat.printer().print(protoPlan, sb); // A JsonFormat printer would also work
+            // TextFormat.printer().print(protoPlan, sb);
+            // A JsonFormat printer would also work
+            toJson(protoPlan, sb);
             return sb.toString();
         }
         catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void toJson(PlanOrBuilder protoPlan, StringBuilder sb)
+            throws IOException
+    {
+        JsonFormat.TypeRegistry typeRegistry = JsonFormat.TypeRegistry.newBuilder()
+                .add(StringValue.getDescriptor())
+                .add(Empty.getDescriptor())
+                .build();
+
+        JsonFormat.printer()
+                .usingTypeRegistry(typeRegistry)
+                .includingDefaultValueFields()
+                .appendTo(protoPlan, sb);
     }
 
     private static io.substrait.plan.Plan.Root buildRoot(Plan plan, Metadata metadata, Session session)
