@@ -103,6 +103,11 @@ These requirements can be expressed with the following rules:
           "exchange_materialization_strategy": "ALL",
           "partitioning_provider_catalog": "hive",
           "hash_partition_count": 4096
+        },
+        "catalogSessionProperties": {
+            "my_catalog": {
+                "quick_stats_enabled": true
+            }
         }
       }
     ]

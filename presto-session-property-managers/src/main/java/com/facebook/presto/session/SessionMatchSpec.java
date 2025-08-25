@@ -39,6 +39,7 @@ public class SessionMatchSpec
     private final Optional<Pattern> resourceGroupRegex;
     private final Optional<Boolean> overrideSessionProperties;
     private final Map<String, String> sessionProperties;
+    private final Map<String, Map<String, String>> catalogSessionProperties;
 
     @JsonCreator
     public SessionMatchSpec(
@@ -49,10 +50,11 @@ public class SessionMatchSpec
             @JsonProperty("group") Optional<Pattern> resourceGroupRegex,
             @JsonProperty("clientInfo") Optional<Pattern> clientInfoRegex,
             @JsonProperty("overrideSessionProperties") Optional<Boolean> overrideSessionProperties,
-            @JsonProperty("sessionProperties") Map<String, String> sessionProperties)
+            @JsonProperty("sessionProperties") Map<String, String> sessionProperties, Map<String, Map<String, String>> catalogSessionProperties)
     {
         this.userRegex = requireNonNull(userRegex, "userRegex is null");
         this.sourceRegex = requireNonNull(sourceRegex, "sourceRegex is null");
+        this.catalogSessionProperties = requireNonNull(catalogSessionProperties, "catalogSessionProperties is null");
         requireNonNull(clientTags, "clientTags is null");
         this.clientTags = ImmutableSet.copyOf(clientTags.orElse(ImmutableList.of()));
         this.queryType = requireNonNull(queryType, "queryType is null");
@@ -148,5 +150,11 @@ public class SessionMatchSpec
     public Map<String, String> getSessionProperties()
     {
         return sessionProperties;
+    }
+
+    @JsonProperty
+    public Map<String, Map<String, String>> getCatalogSessionProperties()
+    {
+        return catalogSessionProperties;
     }
 }
