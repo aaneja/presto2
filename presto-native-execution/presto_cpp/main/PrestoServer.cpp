@@ -28,6 +28,7 @@
 #include "presto_cpp/main/common/Utils.h"
 #include "presto_cpp/main/connectors/Registration.h"
 #include "presto_cpp/main/connectors/SystemConnector.h"
+#include "presto_cpp/main/functions/FunctionMetadata.h"
 #include "presto_cpp/main/http/HttpConstants.h"
 #include "presto_cpp/main/http/filters/AccessLogFilter.h"
 #include "presto_cpp/main/http/filters/HttpEndpointLatencyFilter.h"
@@ -39,7 +40,6 @@
 #include "presto_cpp/main/operators/PartitionAndSerialize.h"
 #include "presto_cpp/main/operators/ShuffleRead.h"
 #include "presto_cpp/main/operators/UnsafeRowExchangeSource.h"
-#include "presto_cpp/main/types/FunctionMetadata.h"
 #include "presto_cpp/main/types/PrestoToVeloxQueryPlan.h"
 #include "presto_cpp/main/types/VeloxPlanConversion.h"
 #include "velox/common/base/Counters.h"
@@ -1264,14 +1264,12 @@ std::vector<std::string> PrestoServer::registerVeloxConnectors(
 
       // make sure connector type is supported
       getPrestoToVeloxConnector(connectorName);
-
-      std::shared_ptr<velox::connector::Connector> connector =
-          velox::connector::getConnectorFactory(connectorName)
-              ->newConnector(
-                  catalogName,
-                  std::move(properties),
-                  connectorIoExecutor_.get(),
-                  connectorCpuExecutor_.get());
+      auto connector = getConnectorFactory(connectorName)
+                           ->newConnector(
+                               catalogName,
+                               std::move(properties),
+                               connectorIoExecutor_.get(),
+                               connectorCpuExecutor_.get());
       velox::connector::registerConnector(connector);
     }
   }

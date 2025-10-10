@@ -5,7 +5,7 @@
     <parent>
         <groupId>com.facebook.presto</groupId>
         <artifactId>presto-root</artifactId>
-        <version>0.295-SNAPSHOT</version>
+        <version>0.296-SNAPSHOT</version>
     </parent>
 
     <artifactId>presto-main</artifactId>
@@ -306,23 +306,6 @@
         <dependency>
             <groupId>io.projectreactor.netty</groupId>
             <artifactId>reactor-netty-http</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-core</artifactId>
-            <version>1.11.0</version>
-            <exclusions>
-                <exclusion>
-                    <groupId>org.hdrhistogram</groupId>
-                    <artifactId>HdrHistogram</artifactId>
-                </exclusion>
-            </exclusions>
-        </dependency>
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-registry-jmx</artifactId>
-            <version>1.11.0</version>
         </dependency>
 
         <dependency>
