@@ -27,6 +27,8 @@ import com.facebook.presto.transaction.TransactionManager;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import jakarta.inject.Inject;
+import org.weakref.jmx.MBeanExporter;
+import org.weakref.jmx.testing.TestingMBeanServer;
 
 import java.security.Principal;
 import java.util.ArrayList;
@@ -107,7 +109,7 @@ public class TestingAccessControlManager
 
     public TestingAccessControlManager(TransactionManager transactionManager, boolean loadDefaultSystemAccessControl)
     {
-        super(transactionManager);
+        super(transactionManager, new MBeanExporter(new TestingMBeanServer()));
         if (loadDefaultSystemAccessControl) {
             setSystemAccessControl(AllowAllSystemAccessControl.NAME, ImmutableMap.of());
         }
