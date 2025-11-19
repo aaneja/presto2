@@ -1,6 +1,7 @@
 package com.facebook.presto.sql.analyzer;
 
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
+import io.substrait.hint.Hint;
 import io.substrait.relation.Extension;
 import io.substrait.relation.ImmutableExtensionSingle;
 import io.substrait.relation.Rel;
@@ -29,6 +30,15 @@ public class SubstraitExchangePOJORel
                 .detail(detail)
                 .deriveRecordType(detail.deriveRecordType(input))
                 .build();
+    }
+
+    public Rel getAsRelWithHint(Hint hint)
+    {
+        return ImmutableExtensionSingle.builder()
+                .input(input)
+                .detail(detail)
+                .deriveRecordType(detail.deriveRecordType(input))
+                .build().withHint(hint);
     }
 
     @Override

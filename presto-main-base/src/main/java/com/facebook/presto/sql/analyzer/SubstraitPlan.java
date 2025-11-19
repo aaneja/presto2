@@ -17,6 +17,7 @@ import com.facebook.presto.Session;
 import com.facebook.presto.common.type.DecimalType;
 import com.facebook.presto.common.type.StandardTypes;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.cost.PlanNodeStatsEstimate;
 import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
@@ -45,25 +46,41 @@ import io.substrait.expression.Expression;
 import io.substrait.expression.FieldReference;
 import io.substrait.extension.ExtensionCollector;
 import io.substrait.extension.SimpleExtension;
+import io.substrait.hint.Hint;
+import io.substrait.hint.ImmutableHint;
 import io.substrait.plan.ImmutablePlan;
 import io.substrait.plan.PlanProtoConverter;
 import io.substrait.proto.PlanOrBuilder;
+import io.substrait.relation.Aggregate;
 import io.substrait.relation.ExtensionSingle;
+import io.substrait.relation.Filter;
+import io.substrait.relation.ImmutableAggregate;
+import io.substrait.relation.ImmutableFilter;
+import io.substrait.relation.ImmutableJoin;
+import io.substrait.relation.ImmutableNamedScan;
+import io.substrait.relation.ImmutableProject;
 import io.substrait.relation.Join;
+import io.substrait.relation.NamedScan;
+import io.substrait.relation.Project;
 import io.substrait.relation.ProtoRelConverter;
 import io.substrait.relation.Rel;
 import io.substrait.relation.RelProtoConverter;
 import io.substrait.relation.extensions.EmptyDetail;
 import io.substrait.type.TypeCreator;
+import presto.substrait.PrestoStats;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
 import static com.facebook.presto.expressions.LogicalRowExpressions.and;
+import static com.facebook.presto.sql.analyzer.SubstraitStats.annotatePlanWithStats;
 
 public class SubstraitPlan
 {
@@ -87,12 +104,18 @@ public class SubstraitPlan
     {
         ImmutablePlan.Builder builder = io.substrait.plan.Plan.builder();
         builder.addRoots(buildRoot(plan, metadata, session));
-        io.substrait.proto.PlanOrBuilder protoPlan = planToProto.toProto(builder.build());
+        io.substrait.proto.Plan protoPlan = planToProto.toProto(builder.build());
+        Map<String, PlanNodeStatsEstimate> planNodeStatsMap = session.getPlanNodeStatsMap().entrySet().stream().collect(Collectors.toMap(entry -> entry.getKey().getId(), // Lambda to convert Integer key to String
+                Map.Entry::getValue // Keep the original value
+        ));
+        io.substrait.proto.Plan patchedPlan = annotatePlanWithStats(protoPlan, planNodeStatsMap);
         try {
             StringBuilder sb = new StringBuilder();
+            byte[] bytes = protoPlan.toByteArray();
+            Files.write(Paths.get("/Users/xiuwenzheng/Documents/projects/result/plan.bin"), bytes);
             // TextFormat.printer().print(protoPlan, sb);
             // A JsonFormat printer would also work
-            toJson(protoPlan, sb);
+            toJson(patchedPlan, sb);
             return sb.toString();
         }
         catch (IOException e) {
@@ -105,7 +128,7 @@ public class SubstraitPlan
     {
         JsonFormat.TypeRegistry typeRegistry = JsonFormat.TypeRegistry.newBuilder()
                 .add(StringValue.getDescriptor())
-                .add(Empty.getDescriptor())
+                .add(Empty.getDescriptor()).add(PrestoStats.PrestoRelStats.getDescriptor())
                 .build();
 
         JsonFormat.printer()
@@ -197,6 +220,38 @@ public class SubstraitPlan
             return rowExpression.accept(substraitRowExpressionVisitor, variableScopeMap);
         }
 
+        private Hint buildHint(PlanNode node)
+        {
+            String alias = node.getId().getId();
+
+            return ImmutableHint.builder().alias(alias).build();
+        }
+
+        private NamedScan withHint(NamedScan scan, PlanNode node)
+        {
+            return ((ImmutableNamedScan) scan).withHint(buildHint(node));
+        }
+
+        private Project withHint(Project proj, PlanNode node)
+        {
+            return ((ImmutableProject) proj).withHint(buildHint(node));
+        }
+
+        private Join withHint(Join join, PlanNode node)
+        {
+            return ((ImmutableJoin) join).withHint(buildHint(node));
+        }
+
+        private Filter withHint(Filter filter, PlanNode node)
+        {
+            return ((ImmutableFilter) filter).withHint(buildHint(node));
+        }
+
+        private Aggregate withHint(Aggregate aggregate, PlanNode node)
+        {
+            return ((ImmutableAggregate) aggregate).withHint(buildHint(node));
+        }
+
         @Override
         public Rel visitPlan(PlanNode node, Void context)
         {
@@ -239,19 +294,18 @@ public class SubstraitPlan
                 relAssignments.add(toSubstraitExpression(entry.getValue(), sourceVariableRefs));
             }
 
-            return b.project(
+            return withHint(b.project(
                     input -> relAssignments.build(),
                     b.remap(), // No remapping in Presto plans
-                    sourceRel);
+                    sourceRel), node);
         }
 
         @Override
         public Rel visitFilter(FilterNode node, Void context)
         {
             Rel sourceRel = node.getSource().accept(this, context);
-            return b.filter(
-                    x -> toSubstraitExpression(node.getPredicate(), getNodeOutputToFieldRefMap(node.getSource(), sourceRel)),
-                    sourceRel);
+            return withHint(b.filter(
+                    x -> toSubstraitExpression(node.getPredicate(), getNodeOutputToFieldRefMap(node.getSource(), sourceRel)), sourceRel), node);
         }
 
         @Override
@@ -273,12 +327,9 @@ public class SubstraitPlan
                     .map(x -> toSubstraitType(metadata.getColumnMetadata(session, tableHandle, assignments.get(x)).getType()))
                     .collect(ImmutableList.toImmutableList());
 
-            return b.namedScan(
-                    // Ideally we would use a metadata method to get the table name from a TableHandle
-                    // We need to add one to the SPI
+            return withHint(b.namedScan(
                     Collections.singletonList(tableHandle.toString()),
-                    readColumns,
-                    columnTypes);
+                    readColumns, columnTypes), node);
         }
 
         @Override
@@ -323,18 +374,16 @@ public class SubstraitPlan
 
             Expression joinExpression = toSubstraitExpression(equiJoinFilter, variablesToFieldRefs.build());
 
-            return b.join(joinInput -> joinExpression,
+            return withHint(b.join(joinInput -> joinExpression,
                     joinType,
-                    leftRel,
-                    rightRel);
+                    leftRel, rightRel), node);
         }
 
         @Override
         public Rel visitExchange(ExchangeNode node, Void context)
         {
             return new SubstraitExchangePOJORel(
-                    node.getSources().get(0).accept(this, context),
-                    node.getType()).getAsRel();
+                    node.getSources().get(0).accept(this, context), node.getType()).getAsRelWithHint(buildHint(node));
         }
     }
 }

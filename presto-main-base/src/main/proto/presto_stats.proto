@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package presto.substrait;
+
+
+message PrestoRelStats {
+  message ColumnStats {
+    string column_name = 1;
+
+    // From VariableStatsEstimate
+    double low_value = 2;
+    double high_value = 3;
+    double nulls_fraction = 4;
+    double average_row_size = 5;
+    double distinct_values_count = 6;
+  }
+
+  repeated ColumnStats columns = 1;
+}
