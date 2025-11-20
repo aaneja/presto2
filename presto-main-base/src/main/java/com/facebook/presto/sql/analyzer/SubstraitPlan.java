@@ -112,7 +112,7 @@ public class SubstraitPlan
         try {
             StringBuilder sb = new StringBuilder();
             byte[] bytes = protoPlan.toByteArray();
-            Files.write(Paths.get("/Users/xiuwenzheng/Documents/projects/result/plan.bin"), bytes);
+            Files.write(Paths.get("/tmp/substrait_plan.bin"), bytes);
             // TextFormat.printer().print(protoPlan, sb);
             // A JsonFormat printer would also work
             toJson(patchedPlan, sb);
