@@ -14,6 +14,7 @@
 package com.facebook.presto.cost;
 
 import com.facebook.presto.Session;
+import com.facebook.presto.common.type.DoubleType;
 import com.facebook.presto.common.type.VarcharType;
 import com.facebook.presto.metadata.MetadataManager;
 import com.facebook.presto.spi.relation.RowExpression;
@@ -21,6 +22,7 @@ import com.facebook.presto.spi.relation.VariableReferenceExpression;
 import com.facebook.presto.sql.InMemoryExpressionOptimizerProvider;
 import com.facebook.presto.sql.TestingRowExpressionTranslator;
 import com.facebook.presto.sql.planner.TypeProvider;
+import com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder;
 import com.facebook.presto.sql.tree.Expression;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.BeforeClass;
@@ -37,6 +39,7 @@ import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
 import static java.lang.String.format;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotEquals;
 
 public abstract class AbstractTestFilterStatsCalculator
 {
@@ -603,6 +606,30 @@ public abstract class AbstractTestFilterStatsCalculator
                                 .lowValue(-1.0)
                                 .highValue(1.0)
                                 .nullsFraction(0.0));
+    }
+
+    @Test
+    public void testComplicatedAndOr()
+    {
+        Expression exp = expression("name <> 'business'");
+        TypeProvider customTypes = TypeProvider.fromVariables(ImmutableList.<VariableReferenceExpression>builder()
+                .add(new VariableReferenceExpression(Optional.empty(), "name", MEDIUM_VARCHAR_TYPE))
+                .build());
+
+        RowExpression rowExpression = translator.translateAndOptimize(exp, customTypes);
+
+        VariableStatsEstimate nameStats = VariableStatsEstimate.builder()
+                .setNullsFraction(0D)
+                .setDistinctValuesCount(1D)
+                .build();
+
+        PlanNodeStatsEstimate inputStats = PlanNodeStatsEstimate.builder()
+                .addVariableStatistics(new VariableReferenceExpression(Optional.empty(), "name", MEDIUM_VARCHAR_TYPE), nameStats)
+                .setOutputRowCount(100D)
+                .build();
+
+        PlanNodeStatsEstimate rowExpressionStatsEstimate = statsCalculator.filterStats(inputStats, rowExpression, session);
+        assertNotEquals(rowExpressionStatsEstimate.getOutputRowCount(), 0D, 0.0001D);
     }
 
     protected PlanNodeStatsAssertion assertExpression(String expression)
