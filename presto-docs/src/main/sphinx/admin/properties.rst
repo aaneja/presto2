@@ -157,7 +157,29 @@ The corresponding session property is :ref:`admin/properties-session:\`\`offset_
 
 Maximum object size in bytes that can be considered serializable in a function call by the coordinator.
 
-The corresponding session property is :ref:`admin/properties-session:\`\`max_serializable_object_size\`\``. 
+The corresponding session property is :ref:`admin/properties-session:\`\`max_serializable_object_size\`\``.
+
+``max-prefixes-count``
+^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``integer``
+* **Minimum value:** ``1``
+* **Default value:** ``100``
+
+Maximum number of prefixes (catalog/schema/table scopes used to narrow metadata lookups) that Presto generates when querying information_schema.
+If the number of computed prefixes exceeds this limit, Presto falls back to a single broader prefix (catalog only).
+If it’s below the limit, the generated prefixes are used.
+
+The corresponding session property is :ref:`admin/properties-session:\`\`max_prefixes_count\`\``.
+
+``cluster-tag``
+^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Default value:** (none)
+
+An optional identifier for the cluster. When set, this tag is included in the response from the 
+``/v1/cluster`` REST API endpoint, allowing clients to identify which cluster provided the response.
 
 Memory Management Properties
 ----------------------------
@@ -1244,8 +1266,24 @@ fails with one of these error codes, it can be automatically retried on a backup
 cluster if a retry URL is provided. Available error codes include standard Presto
 error codes such as ``REMOTE_TASK_ERROR``, ``CLUSTER_OUT_OF_MEMORY``, etc.
 
-Materialized View Properties
-----------------------------
+View and Materialized View Properties
+-------------------------------------
+
+``default-view-security-mode``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``string``
+* **Allowed values:** ``DEFINER``, ``INVOKER``
+* **Default value:** ``DEFINER``
+
+Sets the default security mode for views and materialized views when the ``SECURITY``
+clause is not explicitly specified in ``CREATE VIEW`` or ``CREATE MATERIALIZED VIEW``
+statements.
+
+* ``DEFINER``: Views execute with the permissions of the user who created them
+* ``INVOKER``: Views execute with the permissions of the user querying them
+
+The corresponding session property is :ref:`admin/properties-session:\`\`default_view_security_mode\`\``.
 
 ``experimental.legacy-materialized-views``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1262,3 +1300,21 @@ The corresponding session property is :ref:`admin/properties-session:\`\`legacy_
 .. warning::
 
     Materialized views are experimental. The SPI and behavior may change in future releases.
+
+``experimental.allow-legacy-materialized-views-toggle``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``false``
+
+Allow the ``legacy_materialized_views`` session property to be changed at runtime.
+By default, the session property value is locked to the server configuration value
+and cannot be changed per-session.
+
+Set this to ``true`` to allow users to toggle between legacy and new materialized
+views implementations using the session property. This is intended for testing and
+migration purposes only.
+
+.. warning::
+
+    This should only be enabled in non-production environments.
