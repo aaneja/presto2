@@ -230,6 +230,7 @@ public class TestQuickStatsProvider
         expectedPartitionStats = convertToPartitionStatistics(mockPartitionQuickStats);
     }
 
+
     @Test
     public void testReadThruCaching()
     {
@@ -261,6 +262,7 @@ public class TestQuickStatsProvider
         assertEquals(quickStats.entrySet().size(), testPartitionsMix.size());
         assertTrue(quickStats.keySet().containsAll(testPartitionsMix));
         quickStats.values().forEach(ps -> assertEquals(ps, expectedPartitionStats));
+        QuickStatsStore.storeFrom(quickStats);
     }
 
     /**

@@ -18,6 +18,9 @@ import com.facebook.presto.spi.Plugin;
 import com.facebook.presto.spi.connector.ConnectorFactory;
 import com.google.common.collect.ImmutableList;
 
+import java.io.File;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -54,6 +57,30 @@ public class HivePlugin
         if (classLoader == null) {
             classLoader = HivePlugin.class.getClassLoader();
         }
+
+        // Print classpath for debugging
+        System.out.println("=== Effective ClassLoader: " + classLoader + " ===");
+
+        if (classLoader instanceof URLClassLoader) {
+            URLClassLoader urlCl = (URLClassLoader) classLoader;
+            System.out.println("Classpath entries:");
+            for (URL url : urlCl.getURLs()) {
+                System.out.println("  " + url);
+            }
+        }
+        else {
+            // Modern JVMs (Java 9+) use non-URL classloaders (BuiltinClassLoader)
+            // They do not expose their classpath directly.
+            System.out.println("Classpath entries not directly accessible from classLoader type: "
+                    + classLoader.getClass().getName());
+
+            // Fallback: print the *system* classpath
+            System.out.println("java.class.path =");
+            for (String cp : System.getProperty("java.class.path").split(File.pathSeparator)) {
+                System.out.println("  " + cp);
+            }
+        }
+
         return classLoader;
     }
 }
