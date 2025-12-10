@@ -105,14 +105,23 @@ public final class ComparisonStatsCalculator
         else {
             filterRange = new StatisticRange(NEGATIVE_INFINITY, true, POSITIVE_INFINITY, true, 1);
         }
-        double filterFactor = 1 - calculateFilterFactor(expressionStatistics, filterRange);
+        double filterFactor;
+        double expressionNDV = expressionStatistics.getDistinctValuesCount();
+        if (Double.compare(expressionNDV, 1D) == 0) {
+            // It's hard to make a meaningful estimate when we have only one distinct value
+            filterFactor = UNKNOWN_FILTER_COEFFICIENT;
+        }
+        else {
+            filterFactor = 1 - calculateFilterFactor(expressionStatistics, filterRange);
+        }
 
         PlanNodeStatsEstimate.Builder estimate = PlanNodeStatsEstimate.buildFrom(inputStatistics);
         estimate.setOutputRowCount(filterFactor * (1 - expressionStatistics.getNullsFraction()) * inputStatistics.getOutputRowCount());
         if (expressionVariable.isPresent()) {
+            double newNDV = expressionNDV == 1 ? 1 : max(expressionNDV - 1, 0); // Don't reduce NDV to zero if orignal NDV was 1, since we're not sure if we eliminated the only distinct value
             VariableStatsEstimate symbolNewEstimate = buildFrom(expressionStatistics)
                     .setNullsFraction(0.0)
-                    .setDistinctValuesCount(max(expressionStatistics.getDistinctValuesCount() - 1, 0))
+                    .setDistinctValuesCount(newNDV)
                     .build();
             estimate = estimate.addVariableStatistics(expressionVariable.get(), symbolNewEstimate);
         }

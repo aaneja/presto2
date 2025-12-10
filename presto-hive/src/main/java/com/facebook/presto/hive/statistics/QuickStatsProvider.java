@@ -133,6 +133,7 @@ public class QuickStatsProvider
         ExecutorService coreExecutor = newCachedThreadPool(daemonThreadsNamed("quick-stats-bg-fetch-%s"));
         this.backgroundFetchExecutor = new BoundedExecutor(coreExecutor, hiveClientConfig.getMaxConcurrentQuickStatsCalls());
         this.backgroundFetchExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) coreExecutor);
+        reloadQuickStats();
     }
 
     @Managed
@@ -150,6 +151,7 @@ public class QuickStatsProvider
     @Managed
     public void reloadQuickStats()
     {
+        log.info("Loaded quick stats from local store");
         try {
             partitionToStatsCache.invalidateAll();
             QuickStatsStore.loadInto(partitionToStatsCache);

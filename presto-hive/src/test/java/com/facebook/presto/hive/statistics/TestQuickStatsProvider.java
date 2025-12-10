@@ -38,6 +38,8 @@ import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.session.PropertyMetadata;
 import com.facebook.presto.testing.TestingConnectorSession;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
@@ -230,6 +232,16 @@ public class TestQuickStatsProvider
         expectedPartitionStats = convertToPartitionStatistics(mockPartitionQuickStats);
     }
 
+    @Test
+    public void testReadFromStore()
+    {
+        Cache<String, PartitionStatistics> cache = CacheBuilder.newBuilder().build();
+        QuickStatsStore.loadInto(cache);
+        // Print cache
+        for (Map.Entry<String, PartitionStatistics> entry : cache.asMap().entrySet()) {
+            System.out.println("Key: " + entry.getKey() + ", Value: " + entry.getValue());
+        }
+    }
 
     @Test
     public void testReadThruCaching()
