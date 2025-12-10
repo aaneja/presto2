@@ -97,7 +97,7 @@ public class QuickStatsProvider
     public static final long MAX_CACHE_ENTRIES = 1_000_000L;
     private final Executor backgroundFetchExecutor;
     private final ThreadPoolExecutorMBean backgroundFetchExecutorMBean;
-    private final ScheduledExecutorService inProgressReaperExecutor = new ScheduledThreadPoolExecutor(1, daemonThreadsNamed("in-progress-reaper"));
+    private final ScheduledExecutorService maintainenceService = new ScheduledThreadPoolExecutor(1, daemonThreadsNamed("in-progress-reaper"));
     private final HdfsEnvironment hdfsEnvironment;
     private final DirectoryLister directoryLister;
     private final List<QuickStatsBuilder> statsBuilderStrategies;
@@ -133,6 +133,32 @@ public class QuickStatsProvider
         ExecutorService coreExecutor = newCachedThreadPool(daemonThreadsNamed("quick-stats-bg-fetch-%s"));
         this.backgroundFetchExecutor = new BoundedExecutor(coreExecutor, hiveClientConfig.getMaxConcurrentQuickStatsCalls());
         this.backgroundFetchExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) coreExecutor);
+        reloadQuickStats();
+    }
+
+    @Managed
+    public void persistQuickStats()
+    {
+        try {
+            QuickStatsStore.storeFrom(partitionToStatsCache.asMap());
+        }
+        catch (Exception e) {
+            log.error(e, "Error persisting quick stats to local store");
+        }
+    }
+
+    // Invalidate and restore the quick stats store from the file store
+    @Managed
+    public void reloadQuickStats()
+    {
+        log.info("Loaded quick stats from local store");
+        try {
+            partitionToStatsCache.invalidateAll();
+            QuickStatsStore.loadInto(partitionToStatsCache);
+        }
+        catch (Exception e) {
+            log.error(e, "Error loading quick stats from the local store");
+        }
     }
 
     @Managed
@@ -260,10 +286,10 @@ public class QuickStatsProvider
         CompletableFuture<PartitionStatistics> future = partitionStatisticsCompletableFuture.get();
         if (future != null) {
             // Add a hook to stop tracking the in-progress build for this partition once the future finishes (successfully or exceptionally)
-            future.whenCompleteAsync((r, e) -> inProgressBuilds.remove(partitionKey), inProgressReaperExecutor);
+            future.whenCompleteAsync((r, e) -> inProgressBuilds.remove(partitionKey), maintainenceService);
 
             // Also add a hook to reap this in-progress thread if it doesn't finish in reaperExpiry seconds
-            inProgressReaperExecutor.schedule(() -> {
+            maintainenceService.schedule(() -> {
                 inProgressBuilds.remove(partitionKey);
                 future.cancel(true);
             }, reaperExpiryMillis, MILLISECONDS);
