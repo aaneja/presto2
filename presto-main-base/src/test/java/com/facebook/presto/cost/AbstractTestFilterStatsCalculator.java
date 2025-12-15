@@ -24,9 +24,12 @@ import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.tree.Expression;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.BeforeClass;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
+import java.util.Collections;
 import java.util.Optional;
+import java.util.stream.IntStream;
 
 import static com.facebook.presto.SystemSessionProperties.OPTIMIZER_USE_HISTOGRAMS;
 import static com.facebook.presto.common.type.DoubleType.DOUBLE;
@@ -37,6 +40,7 @@ import static java.lang.Double.NaN;
 import static java.lang.Double.POSITIVE_INFINITY;
 import static java.lang.String.format;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotEquals;
 
 public abstract class AbstractTestFilterStatsCalculator
 {
@@ -498,6 +502,71 @@ public abstract class AbstractTestFilterStatsCalculator
                                 .setLowValue(-10.0)
                                 .setHighValue(10.0)
                                 .build());
+    }
+
+    @Test
+    public void testNotInPredicateWithoutNDV()
+    {
+        Expression exp = expression("status NOT IN ('foo','bar')");
+        TypeProvider customTypes = TypeProvider.fromVariables(ImmutableList.<VariableReferenceExpression>builder()
+                .add(new VariableReferenceExpression(Optional.empty(), "status", MEDIUM_VARCHAR_TYPE))
+                .build());
+
+        RowExpression rowExpression = translator.translateAndOptimize(exp, customTypes);
+
+        VariableStatsEstimate nameStats = VariableStatsEstimate.builder()
+                .setNullsFraction(0.0D)
+                .build();
+
+        PlanNodeStatsEstimate inputStats = PlanNodeStatsEstimate.builder()
+                .addVariableStatistics(new VariableReferenceExpression(Optional.empty(), "status", MEDIUM_VARCHAR_TYPE), nameStats)
+                .setOutputRowCount(100D)
+                .build();
+
+        PlanNodeStatsEstimate rowExpressionStatsEstimate = statsCalculator.filterStats(inputStats, rowExpression, session);
+
+        // Some rows should remain for the NOT IN
+        // If NDV is unknown, we get a back a UNKNOWN estimate, which is better than 0
+        assertNotEquals(rowExpressionStatsEstimate.getOutputRowCount(), 0D, 0.0001D);
+    }
+
+    @DataProvider(name = "inList")
+    public Object[][] inList()
+    {
+        return new Object[][] {
+                {"'one'"},
+                {"'one','two'"},
+                {"'one','two','three'"},
+                {"'one','two','three','four'"},
+                {"'one','two','three','four','five'"},
+                {"'one','two','three','four','five','six'"}
+        };
+    }
+
+    @Test(dataProvider = "inList")
+    public void testNotInPredicateWithLargerInList(String inList)
+    {
+        Expression exp = expression("status NOT IN (" + inList + ")");
+        TypeProvider customTypes = TypeProvider.fromVariables(ImmutableList.<VariableReferenceExpression>builder()
+                .add(new VariableReferenceExpression(Optional.empty(), "status", MEDIUM_VARCHAR_TYPE))
+                .build());
+
+        RowExpression rowExpression = translator.translateAndOptimize(exp, customTypes);
+
+        VariableStatsEstimate nameStats = VariableStatsEstimate.builder()
+                .setNullsFraction(0.0D)
+                .setDistinctValuesCount(5D)
+                .build();
+
+        PlanNodeStatsEstimate inputStats = PlanNodeStatsEstimate.builder()
+                .addVariableStatistics(new VariableReferenceExpression(Optional.empty(), "status", MEDIUM_VARCHAR_TYPE), nameStats)
+                .setOutputRowCount(100D)
+                .build();
+
+        PlanNodeStatsEstimate rowExpressionStatsEstimate = statsCalculator.filterStats(inputStats, rowExpression, session);
+        System.out.println("Resulting stats: " + rowExpressionStatsEstimate);
+        // Some rows should remain for the NOT IN - we cant assume all the IN values will match
+        assertNotEquals(rowExpressionStatsEstimate.getOutputRowCount(), 0D, 0.0001D);
     }
 
     @Test
