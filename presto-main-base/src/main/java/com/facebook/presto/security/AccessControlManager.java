@@ -183,12 +183,12 @@ public class AccessControlManager
     }
 
     @Override
-    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
+    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<String, String> preparedStatements, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
     {
         requireNonNull(identity, "identity is null");
         requireNonNull(query, "query is null");
 
-        authenticationCheck(() -> systemAccessControl.checkQueryIntegrity(identity, context, query, viewDefinitions, materializedViewDefinitions));
+        authenticationCheck(() -> systemAccessControl.checkQueryIntegrity(identity, context, query, preparedStatements, viewDefinitions, materializedViewDefinitions));
     }
 
     @Override
@@ -706,6 +706,26 @@ public class AccessControlManager
     }
 
     @Override
+    public void checkCanCallProcedure(TransactionId transactionId, Identity identity, AccessControlContext context, QualifiedObjectName procedureName)
+    {
+        requireNonNull(identity, "identity is null");
+        requireNonNull(procedureName, "procedureName is null");
+
+        authenticationCheck(() -> checkCanAccessCatalog(identity, context, procedureName.getCatalogName()));
+
+        authorizationCheck(() -> systemAccessControl.checkCanCallProcedure(
+                identity,
+                context,
+                toCatalogSchemaTableName(procedureName)));
+
+        CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, procedureName.getCatalogName());
+        if (entry != null) {
+            authorizationCheck(() -> entry.getAccessControl().checkCanCallProcedure(entry.getTransactionHandle(transactionId),
+                    identity.toConnectorIdentity(procedureName.getCatalogName()), context, toSchemaTableName(procedureName)));
+        }
+    }
+
+    @Override
     public void checkCanCreateRole(TransactionId transactionId, Identity identity, AccessControlContext context, String role, Optional<PrestoPrincipal> grantor, String catalogName)
     {
         requireNonNull(identity, "identity is null");
@@ -824,6 +844,38 @@ public class AccessControlManager
         CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, catalogName);
         if (entry != null) {
             authenticationCheck(() -> entry.getAccessControl().checkCanShowRoleGrants(entry.getTransactionHandle(transactionId), identity.toConnectorIdentity(catalogName), context, catalogName));
+        }
+    }
+
+    @Override
+    public void checkCanDropBranch(TransactionId transactionId, Identity identity, AccessControlContext context, QualifiedObjectName tableName)
+    {
+        requireNonNull(identity, "identity is null");
+        requireNonNull(tableName, "tableName is null");
+
+        authenticationCheck(() -> checkCanAccessCatalog(identity, context, tableName.getCatalogName()));
+
+        authorizationCheck(() -> systemAccessControl.checkCanDropBranch(identity, context, toCatalogSchemaTableName(tableName)));
+
+        CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, tableName.getCatalogName());
+        if (entry != null) {
+            authorizationCheck(() -> entry.getAccessControl().checkCanDropBranch(entry.getTransactionHandle(transactionId), identity.toConnectorIdentity(tableName.getCatalogName()), context, toSchemaTableName(tableName)));
+        }
+    }
+
+    @Override
+    public void checkCanDropTag(TransactionId transactionId, Identity identity, AccessControlContext context, QualifiedObjectName tableName)
+    {
+        requireNonNull(identity, "identity is null");
+        requireNonNull(tableName, "tableName is null");
+
+        authenticationCheck(() -> checkCanAccessCatalog(identity, context, tableName.getCatalogName()));
+
+        authorizationCheck(() -> systemAccessControl.checkCanDropTag(identity, context, toCatalogSchemaTableName(tableName)));
+
+        CatalogAccessControlEntry entry = getConnectorAccessControl(transactionId, tableName.getCatalogName());
+        if (entry != null) {
+            authorizationCheck(() -> entry.getAccessControl().checkCanDropTag(entry.getTransactionHandle(transactionId), identity.toConnectorIdentity(tableName.getCatalogName()), context, toSchemaTableName(tableName)));
         }
     }
 
@@ -1009,7 +1061,7 @@ public class AccessControlManager
             implements SystemAccessControl
     {
         @Override
-        public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
+        public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<String, String> preparedStatements, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
         {
             throw new PrestoException(SERVER_STARTING_UP, "Presto server is still initializing");
         }

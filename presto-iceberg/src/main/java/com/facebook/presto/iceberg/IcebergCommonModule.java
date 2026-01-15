@@ -48,6 +48,8 @@ import com.facebook.presto.iceberg.procedure.FastForwardBranchProcedure;
 import com.facebook.presto.iceberg.procedure.ManifestFileCacheInvalidationProcedure;
 import com.facebook.presto.iceberg.procedure.RegisterTableProcedure;
 import com.facebook.presto.iceberg.procedure.RemoveOrphanFiles;
+import com.facebook.presto.iceberg.procedure.RewriteDataFilesProcedure;
+import com.facebook.presto.iceberg.procedure.RewriteManifestsProcedure;
 import com.facebook.presto.iceberg.procedure.RollbackToSnapshotProcedure;
 import com.facebook.presto.iceberg.procedure.RollbackToTimestampProcedure;
 import com.facebook.presto.iceberg.procedure.SetCurrentSnapshotProcedure;
@@ -78,6 +80,7 @@ import com.facebook.presto.parquet.cache.ParquetCacheConfig;
 import com.facebook.presto.parquet.cache.ParquetFileMetadata;
 import com.facebook.presto.parquet.cache.ParquetMetadataSource;
 import com.facebook.presto.spi.MaterializedViewDefinition;
+import com.facebook.presto.spi.SchemaTableName;
 import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
 import com.facebook.presto.spi.connector.ConnectorPageSinkProvider;
 import com.facebook.presto.spi.connector.ConnectorPageSourceProvider;
@@ -155,6 +158,7 @@ public class IcebergCommonModule
         newOptionalBinder(binder, IcebergNessieConfig.class);  // bind optional Nessie config to IcebergSessionProperties
 
         binder.bind(IcebergTableProperties.class).in(Scopes.SINGLETON);
+        binder.bind(IcebergMaterializedViewProperties.class).in(Scopes.SINGLETON);
 
         binder.bind(ConnectorSplitManager.class).to(IcebergSplitManager.class).in(Scopes.SINGLETON);
         newExporter(binder).export(ConnectorSplitManager.class).as(generatedNameOf(IcebergSplitManager.class, connectorId));
@@ -169,6 +173,7 @@ public class IcebergCommonModule
 
         jsonCodecBinder(binder).bindJsonCodec(CommitTaskData.class);
         jsonCodecBinder(binder).bindListJsonCodec(MaterializedViewDefinition.ColumnMapping.class);
+        jsonCodecBinder(binder).bindListJsonCodec(SchemaTableName.class);
 
         binder.bind(FileFormatDataSourceStats.class).in(Scopes.SINGLETON);
         newExporter(binder).export(FileFormatDataSourceStats.class).withGeneratedName();
@@ -188,6 +193,8 @@ public class IcebergCommonModule
         procedures.addBinding().toProvider(SetTablePropertyProcedure.class).in(Scopes.SINGLETON);
         procedures.addBinding().toProvider(StatisticsFileCacheInvalidationProcedure.class).in(Scopes.SINGLETON);
         procedures.addBinding().toProvider(ManifestFileCacheInvalidationProcedure.class).in(Scopes.SINGLETON);
+        procedures.addBinding().toProvider(RewriteDataFilesProcedure.class).in(Scopes.SINGLETON);
+        procedures.addBinding().toProvider(RewriteManifestsProcedure.class).in(Scopes.SINGLETON);
 
         // for orc
         binder.bind(EncryptionLibrary.class).annotatedWith(HiveDwrfEncryptionProvider.ForCryptoService.class).to(UnsupportedEncryptionLibrary.class).in(Scopes.SINGLETON);

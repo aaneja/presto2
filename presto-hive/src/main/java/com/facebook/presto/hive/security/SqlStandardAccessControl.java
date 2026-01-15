@@ -56,17 +56,20 @@ import static com.facebook.presto.hive.metastore.thrift.ThriftMetastoreUtil.list
 import static com.facebook.presto.hive.metastore.thrift.ThriftMetastoreUtil.listEnabledTablePrivileges;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyAddColumn;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyAddConstraint;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyCallProcedure;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateRole;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateViewWithSelect;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDeleteTable;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropBranch;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropColumn;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropConstraint;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropRole;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropTable;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropTag;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyGrantRoles;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyGrantTablePrivilege;
@@ -101,14 +104,17 @@ public class SqlStandardAccessControl
 
     private final String connectorId;
     private final HiveTransactionManager hiveTransactionManager;
+    private final boolean restrictProcedureCall;
 
     @Inject
     public SqlStandardAccessControl(
             HiveConnectorId connectorId,
-            HiveTransactionManager hiveTransactionManager)
+            HiveTransactionManager hiveTransactionManager,
+            SecurityConfig securityConfig)
     {
         this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
         this.hiveTransactionManager = requireNonNull(hiveTransactionManager, "hiveTransactionManager is null");
+        this.restrictProcedureCall = requireNonNull(securityConfig, "securityConfig is null").isRestrictProcedureCall();
     }
 
     @Override
@@ -246,6 +252,42 @@ public class SqlStandardAccessControl
     }
 
     @Override
+    public void checkCanDropBranch(ConnectorTransactionHandle transaction, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
+    {
+        MetastoreContext metastoreContext = new MetastoreContext(
+                identity, context.getQueryId().getId(),
+                context.getClientInfo(),
+                context.getClientTags(),
+                context.getSource(),
+                Optional.empty(),
+                false,
+                HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER,
+                context.getWarningCollector(),
+                context.getRuntimeStats());
+        if (!isTableOwner(transaction, identity, metastoreContext, tableName)) {
+            denyDropBranch(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanDropTag(ConnectorTransactionHandle transaction, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
+    {
+        MetastoreContext metastoreContext = new MetastoreContext(
+                identity, context.getQueryId().getId(),
+                context.getClientInfo(),
+                context.getClientTags(),
+                context.getSource(),
+                Optional.empty(),
+                false,
+                HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER,
+                context.getWarningCollector(),
+                context.getRuntimeStats());
+        if (!isTableOwner(transaction, identity, metastoreContext, tableName)) {
+            denyDropTag(tableName.toString());
+        }
+    }
+
+    @Override
     public void checkCanDropConstraint(ConnectorTransactionHandle transaction, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
     {
         MetastoreContext metastoreContext = createMetastoreContext(identity, context);
@@ -278,6 +320,14 @@ public class SqlStandardAccessControl
         MetastoreContext metastoreContext = createMetastoreContext(identity, context);
         if (!checkTablePermission(transaction, identity, metastoreContext, tableName, SELECT, false)) {
             denySelectTable(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanCallProcedure(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName procedureName)
+    {
+        if (restrictProcedureCall) {
+            denyCallProcedure(procedureName.toString());
         }
     }
 

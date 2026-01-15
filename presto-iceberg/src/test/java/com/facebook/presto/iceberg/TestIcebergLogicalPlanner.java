@@ -15,6 +15,8 @@ package com.facebook.presto.iceberg;
 
 import com.facebook.presto.Session;
 import com.facebook.presto.Session.SessionBuilder;
+import com.facebook.presto.common.RuntimeMetric;
+import com.facebook.presto.common.RuntimeStats;
 import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.predicate.Domain;
 import com.facebook.presto.common.predicate.TupleDomain;
@@ -86,9 +88,11 @@ import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.SYNTHESIZ
 import static com.facebook.presto.hive.MetadataUtils.isEntireColumn;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.getSynthesizedIcebergColumnHandle;
 import static com.facebook.presto.iceberg.IcebergColumnHandle.isPushedDownSubfield;
+import static com.facebook.presto.iceberg.IcebergPartitionLoader.LAZY_LOADING_COUNT_KEY_TEMPLATE;
 import static com.facebook.presto.iceberg.IcebergQueryRunner.ICEBERG_CATALOG;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.PARQUET_DEREFERENCE_PUSHDOWN_ENABLED;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.PUSHDOWN_FILTER_ENABLED;
+import static com.facebook.presto.iceberg.IcebergSessionProperties.ROWS_FOR_METADATA_OPTIMIZATION_THRESHOLD;
 import static com.facebook.presto.iceberg.IcebergSessionProperties.isPushdownFilterEnabled;
 import static com.facebook.presto.parquet.ParquetTypeUtils.pushdownColumnNameForSubfield;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.AND;
@@ -98,6 +102,7 @@ import static com.facebook.presto.sql.planner.assertions.MatchResult.NO_MATCH;
 import static com.facebook.presto.sql.planner.assertions.MatchResult.match;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.anyNot;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.anyTree;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.callDistributedProcedure;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.exchange;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.expression;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.filter;
@@ -107,8 +112,14 @@ import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.output
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.project;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.strictProject;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.strictTableScan;
+import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.tableFinish;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
 import static com.facebook.presto.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.REMOTE_STREAMING;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.GATHER;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.Type.REPARTITION;
+import static com.facebook.presto.tests.sql.TestTable.randomTableSuffix;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -118,6 +129,8 @@ import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 import static java.util.Objects.requireNonNull;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
 
 public class TestIcebergLogicalPlanner
@@ -198,6 +211,90 @@ public class TestIcebergLogicalPlanner
         }
         finally {
             queryRunner.execute("DROP TABLE IF EXISTS metadata_optimize");
+        }
+    }
+
+    @Test(dataProvider = "push_down_filter_enabled")
+    public void testMetadataQueryOptimizerWithMaxPartitionThreshold(boolean enabled)
+    {
+        QueryRunner queryRunner = getQueryRunner();
+        String schemaName = getSession().getSchema().get();
+        String tableName = "metadata_optimize_with_threshold_" + randomTableSuffix();
+        try {
+            queryRunner.execute("create table " + tableName + "(v1 int, v2 varchar, a int, b varchar)" +
+                    " with(partitioning = ARRAY['a', 'b'])");
+            // insert data into 4 different partitions
+            queryRunner.execute("insert into " + tableName + " values" +
+                    " (1, '1001', 1, '1001')," +
+                    " (2, '1002', 2, '1001')," +
+                    " (3, '1003', 3, '1002')," +
+                    " (4, '1004', 4, '1002')");
+
+            // Perform metadata optimization when the number of partitions does not exceed the threshold
+            Session sessionWithThresholdBigger = getSessionWithOptimizeMetadataQueriesAndThreshold(enabled, 4);
+            assertQuery(sessionWithThresholdBigger, "select b, max(a), min(a) from " + tableName + " group by b",
+                    "values('1001', 2, 1), ('1002', 4, 3)");
+
+            assertPlan(sessionWithThresholdBigger, "select b, max(a), min(a) from " + tableName + " group by b",
+                    anyTree(values(
+                            ImmutableList.of("a", "b"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002"))))));
+
+            String countKey = format(LAZY_LOADING_COUNT_KEY_TEMPLATE, schemaName, tableName);
+            RuntimeMetric partitionsLazyLoadingCountMetric = sessionWithThresholdBigger.getRuntimeStats().getMetrics().get(countKey);
+            assertNotNull(partitionsLazyLoadingCountMetric);
+            assertEquals(partitionsLazyLoadingCountMetric.getCount(), 1);
+
+            assertQuery(sessionWithThresholdBigger, "select distinct a, b from " + tableName,
+                    "values(1, '1001'), (2, '1001'), (3, '1002'), (4, '1002')");
+            assertPlan(sessionWithThresholdBigger, "select distinct a, b from " + tableName,
+                    anyTree(values(
+                            ImmutableList.of("a", "b"),
+                            ImmutableList.of(
+                                    ImmutableList.of(new LongLiteral("1"), new StringLiteral("1001")),
+                                    ImmutableList.of(new LongLiteral("2"), new StringLiteral("1001")),
+                                    ImmutableList.of(new LongLiteral("3"), new StringLiteral("1002")),
+                                    ImmutableList.of(new LongLiteral("4"), new StringLiteral("1002"))))));
+            assertEquals(partitionsLazyLoadingCountMetric.getCount(), 2);
+
+            // Do not perform metadata optimization when the number of partitions exceeds the threshold
+            Session sessionWithThresholdSmaller = getSessionWithOptimizeMetadataQueriesAndThreshold(false, 3);
+            assertQuery(sessionWithThresholdSmaller, "select b, max(a), min(a) from " + tableName + " group by b",
+                    "values('1001', 2, 1), ('1002', 4, 3)");
+            assertPlan(sessionWithThresholdSmaller, "select b, max(a), min(a) from " + tableName + " group by b",
+                    anyTree(strictTableScan(tableName, identityMap("a", "b"))));
+
+            RuntimeMetric partitionsLazyLoadingCountMetric2 = sessionWithThresholdSmaller.getRuntimeStats().getMetrics().get(countKey);
+            assertNotNull(partitionsLazyLoadingCountMetric2);
+            assertEquals(partitionsLazyLoadingCountMetric2.getCount(), 1);
+
+            assertQuery(sessionWithThresholdSmaller, "select distinct a, b from " + tableName,
+                    "values(1, '1001'), (2, '1001'), (3, '1002'), (4, '1002')");
+            assertPlan(sessionWithThresholdSmaller, "select distinct a, b from " + tableName,
+                    anyTree(strictTableScan(tableName, identityMap("a", "b"))));
+            assertEquals(partitionsLazyLoadingCountMetric2.getCount(), 2);
+
+            // Perform further reducible optimization regardless of whether the number of partitions exceeds the threshold
+            assertQuery(sessionWithThresholdBigger, "select min(a), max(b) from " + tableName, "values(1, '1002')");
+            assertPlan(sessionWithThresholdBigger, "select min(a), max(b) from " + tableName,
+                    anyNot(AggregationNode.class, strictProject(
+                            ImmutableMap.of("a", expression("1"), "b", expression("1002")),
+                            anyTree(values()))));
+            assertEquals(partitionsLazyLoadingCountMetric.getCount(), 3);
+
+            assertQuery(sessionWithThresholdSmaller, "select min(a), max(b) from " + tableName, "values(1, '1002')");
+            assertPlan(sessionWithThresholdSmaller, "select min(a), max(b) from " + tableName,
+                    anyNot(AggregationNode.class, strictProject(
+                            ImmutableMap.of("a", expression("1"), "b", expression("1002")),
+                            anyTree(values()))));
+            assertEquals(partitionsLazyLoadingCountMetric2.getCount(), 3);
+        }
+        finally {
+            queryRunner.execute("DROP TABLE IF EXISTS " + tableName);
         }
     }
 
@@ -517,16 +614,21 @@ public class TestIcebergLogicalPlanner
     public void testFilterByUnmatchedValue(boolean enabled)
     {
         Session session = getSessionWithOptimizeMetadataQueries(enabled);
-        String tableName = "test_filter_by_unmatched_value";
+        String schemaName = session.getSchema().get();
+        String tableName = "test_filter_by_unmatched_value_" + randomTableSuffix();
         assertUpdate("CREATE TABLE " + tableName + " (a varchar, b integer, r row(c int, d varchar)) WITH(partitioning = ARRAY['a'])");
 
         // query with normal column filter on empty table
         assertPlan(session, "select a, r from " + tableName + " where b = 1001",
                 output(values("a", "r")));
 
+        String countKey = format(LAZY_LOADING_COUNT_KEY_TEMPLATE, schemaName, tableName);
+        assertNull(session.getRuntimeStats().getMetrics().get(countKey));
+
         // query with partition column filter on empty table
         assertPlan(session, "select b, r from " + tableName + " where a = 'var3'",
                 output(values("b", "r")));
+        assertNull(session.getRuntimeStats().getMetrics().get(countKey));
 
         assertUpdate("INSERT INTO " + tableName + " VALUES ('var1', 1, (1001, 't1')), ('var1', 3, (1003, 't3'))", 2);
         assertUpdate("INSERT INTO " + tableName + " VALUES ('var2', 8, (1008, 't8')), ('var2', 10, (1010, 't10'))", 2);
@@ -535,10 +637,12 @@ public class TestIcebergLogicalPlanner
         // query with unmatched normal column filter
         assertPlan(session, "select a, r from " + tableName + " where b = 1001",
                 output(values("a", "r")));
+        assertNull(session.getRuntimeStats().getMetrics().get(countKey));
 
         // query with unmatched partition column filter
         assertPlan(session, "select b, r from " + tableName + " where a = 'var3'",
                 output(values("b", "r")));
+        assertNull(session.getRuntimeStats().getMetrics().get(countKey));
 
         assertUpdate("DROP TABLE " + tableName);
     }
@@ -547,18 +651,20 @@ public class TestIcebergLogicalPlanner
     public void testFiltersWithPushdownDisable()
     {
         // The filter pushdown session property is disabled by default
-        Session sessionWithoutFilterPushdown = getQueryRunner().getDefaultSession();
+        Session sessionWithoutFilterPushdown = getSessionWithNewRuntimeStats(getQueryRunner().getDefaultSession());
+        String schemaName = sessionWithoutFilterPushdown.getSchema().get();
+        String tableName = "test_filters_with_pushdown_disable_" + randomTableSuffix();
 
-        assertUpdate("CREATE TABLE test_filters_with_pushdown_disable(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id'])");
-        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES(10, 'adam', (10, 'adam')), (11, 'hd001', (11, 'hd001'))", 2);
+        assertUpdate("CREATE TABLE " + tableName + "(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id'])");
+        assertUpdate("INSERT INTO " + tableName + " VALUES(10, 'adam', (10, 'adam')), (11, 'hd001', (11, 'hd001'))", 2);
 
         // Only identity partition column predicates, would be enforced totally by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT name, r FROM test_filters_with_pushdown_disable WHERE id = 10",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT name, r FROM " + tableName + " WHERE id = 10",
                 output(exchange(
-                        strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "r")))),
+                        strictTableScan(tableName, identityMap("name", "r")))),
                 plan -> assertTableLayout(
                         plan,
-                        "test_filters_with_pushdown_disable",
+                        tableName,
                         withColumnDomains(ImmutableMap.of(new Subfield(
                                         "id",
                                         ImmutableList.of()),
@@ -566,78 +672,91 @@ public class TestIcebergLogicalPlanner
                         TRUE_CONSTANT,
                         ImmutableSet.of("id")));
 
+        String countKey = format(LAZY_LOADING_COUNT_KEY_TEMPLATE, schemaName, tableName);
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
+
         // Only normal column predicates, would not be enforced by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM test_filters_with_pushdown_disable WHERE name = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM " + tableName + " WHERE name = 'adam'",
                 output(exchange(project(
                         filter("name='adam'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name", "r")))))));
+                                strictTableScan(tableName, identityMap("id", "name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Only subfield column predicates, would not be enforced by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE r.a = 10",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM " + tableName + " WHERE r.a = 10",
                 output(exchange(project(
                         filter("r.a=10",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name", "r")))))));
+                                strictTableScan(tableName, identityMap("id", "name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Predicates with identity partition column and normal column
         // The predicate was enforced partially by tableScan, so the filterNode drop it's filter condition `id=10`
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM test_filters_with_pushdown_disable WHERE id = 10 and name = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM " + tableName + " WHERE id = 10 and name = 'adam'",
                 output(exchange(project(
                         ImmutableMap.of("id", expression("10")),
                         filter("name='adam'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "r")))))));
+                                strictTableScan(tableName, identityMap("name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Predicates with identity partition column and subfield column
         // The predicate was enforced partially by tableScan, so the filterNode drop it's filter condition `id=10`
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE id = 10 and r.b = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM " + tableName + " WHERE id = 10 and r.b = 'adam'",
                 output(exchange(project(
                         ImmutableMap.of("id", expression("10")),
                         filter("r.b='adam'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "r")))))));
+                                strictTableScan(tableName, identityMap("name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Predicates expression `in` for identity partition columns could be enforced by iceberg table as well
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE id in (1, 3, 5, 7, 9, 10) and r.b = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM " + tableName + " WHERE id in (1, 3, 5, 7, 9, 10) and r.b = 'adam'",
                 output(exchange(project(
                         filter("r.b='adam'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name", "r")))))));
+                                strictTableScan(tableName, identityMap("id", "name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // When predicate simplification causing changes in the predicate, it could not be enforced by iceberg table
         String params = "(" + Joiner.on(", ").join(IntStream.rangeClosed(1, 50).mapToObj(i -> String.valueOf(2 * i + 1)).toArray()) + ")";
-        assertPlan(sessionWithoutFilterPushdown, "SELECT name FROM test_filters_with_pushdown_disable WHERE id in " + params + " and r.b = 'adam'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT name FROM " + tableName + " WHERE id in " + params + " and r.b = 'adam'",
                 output(exchange(project(
                         filter("r.b='adam' AND id in " + params,
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name", "r")))))));
+                                strictTableScan(tableName, identityMap("id", "name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Add a new identity partitioned column for iceberg table
-        assertUpdate("ALTER TABLE test_filters_with_pushdown_disable add column newpart bigint with (partitioning = 'identity')");
-        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES(10, 'newman', (10, 'newman'), 1001)", 1);
+        assertUpdate("ALTER TABLE " + tableName + " add column newpart bigint with (partitioning = 'identity')");
+        assertUpdate("INSERT INTO " + tableName + " VALUES(10, 'newman', (10, 'newman'), 1001)", 1);
 
         // Predicates with originally present identity partition column and newly added identity partition column
         // Only the predicate on originally present identity partition column could be enforced by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM test_filters_with_pushdown_disable WHERE id = 10 and newpart = 1001",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, name FROM " + tableName + " WHERE id = 10 and newpart = 1001",
                 output(exchange(project(
                         ImmutableMap.of("id", expression("10")),
                         filter("newpart=1001",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "newpart")))))));
+                                strictTableScan(tableName, identityMap("name", "newpart")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
-        assertUpdate("DROP TABLE test_filters_with_pushdown_disable");
+        assertUpdate("DROP TABLE " + tableName);
 
-        assertUpdate("CREATE TABLE test_filters_with_pushdown_disable(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id', 'truncate(name, 2)'])");
-        assertUpdate("INSERT INTO test_filters_with_pushdown_disable VALUES (10, 'hd001', (10, 'newman'))", 1);
+        assertUpdate("CREATE TABLE " + tableName + "(id int, name varchar, r row(a int, b varchar)) with (partitioning = ARRAY['id', 'truncate(name, 2)'])");
+        assertUpdate("INSERT INTO " + tableName + " VALUES (10, 'hd001', (10, 'newman'))", 1);
 
         // Predicates with non-identity partitioned column could not be enforced by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id FROM test_filters_with_pushdown_disable WHERE name = 'hd001'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id FROM " + tableName + " WHERE name = 'hd001'",
                 output(exchange(project(
                         filter("name='hd001'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("id", "name")))))));
+                                strictTableScan(tableName, identityMap("id", "name")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
 
         // Predicates with identity partition column and non-identity partitioned column
         // Only the predicate on identity partition column could be enforced by tableScan
-        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM test_filters_with_pushdown_disable WHERE id = 10 and name = 'hd001'",
+        assertPlan(sessionWithoutFilterPushdown, "SELECT id, r FROM " + tableName + " WHERE id = 10 and name = 'hd001'",
                 output(exchange(project(
                         ImmutableMap.of("id", expression("10")),
                         filter("name='hd001'",
-                                strictTableScan("test_filters_with_pushdown_disable", identityMap("name", "r")))))));
-        assertUpdate("DROP TABLE test_filters_with_pushdown_disable");
+                                strictTableScan(tableName, identityMap("name", "r")))))));
+        assertNull(sessionWithoutFilterPushdown.getRuntimeStats().getMetrics().get(countKey));
+
+        assertUpdate("DROP TABLE " + tableName);
     }
 
     @Test
@@ -724,6 +843,59 @@ public class TestIcebergLogicalPlanner
                             TRUE_CONSTANT,
                             ImmutableSet.of("a", "c")));
             assertQuery("SELECT * FROM " + tableName, "VALUES (3, '1003', 3), (4, '1004', 4), (5, '1005', 5)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testCallDistributedProcedureOnPartitionedTable()
+    {
+        String tableName = "partition_table_for_call_distributed_procedure";
+        try {
+            assertUpdate("CREATE TABLE " + tableName + " (c1 integer, c2 varchar) with (partitioning = ARRAY['c1'])");
+            assertUpdate("INSERT INTO " + tableName + " values(1, 'foo'), (2, 'bar')", 2);
+            assertUpdate("INSERT INTO " + tableName + " values(3, 'foo'), (4, 'bar')", 2);
+            assertUpdate("INSERT INTO " + tableName + " values(5, 'foo'), (6, 'bar')", 2);
+
+            assertPlan(format("CALL system.rewrite_data_files(table_name => '%s', schema => '%s')", tableName, getSession().getSchema().get()),
+                    output(tableFinish(exchange(REMOTE_STREAMING, GATHER,
+                            callDistributedProcedure(
+                                    exchange(LOCAL, GATHER,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    strictTableScan(tableName, identityMap("c1", "c2")))))))));
+
+            // Do not support the filter that couldn't be enforced totally by tableScan
+            assertQueryFails(format("CALL system.rewrite_data_files(table_name => '%s', schema => '%s', filter => 'c2 > ''bar''')", tableName, getSession().getSchema().get()),
+                    "Unexpected FilterNode found in plan; probably connector was not able to handle provided WHERE expression");
+
+            // Support the filter that could be enforced totally by tableScan
+            assertPlan(getSession(), format("CALL system.rewrite_data_files(table_name => '%s', schema => '%s', filter => 'c1 > 3')", tableName, getSession().getSchema().get()),
+                    output(tableFinish(exchange(REMOTE_STREAMING, GATHER,
+                            callDistributedProcedure(
+                                    exchange(LOCAL, GATHER,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    strictTableScan(tableName, identityMap("c1", "c2")))))))),
+                    plan -> assertTableLayout(
+                            plan,
+                            tableName,
+                            withColumnDomains(ImmutableMap.of(
+                                    new Subfield(
+                                            "c1",
+                                            ImmutableList.of()),
+                                    Domain.create(ValueSet.ofRanges(greaterThan(INTEGER, 3L)), false))),
+                            TRUE_CONSTANT,
+                            ImmutableSet.of("c1")));
+
+            // Support filter conditions that are always false, which cause the underlying TableScanNode to be optimized into an empty ValuesNode
+            assertPlan(getSession(), format("CALL system.rewrite_data_files(table_name => '%s', schema => '%s', filter => '1 > 2')", tableName, getSession().getSchema().get()),
+                    output(tableFinish(exchange(REMOTE_STREAMING, GATHER,
+                            callDistributedProcedure(
+                                    exchange(LOCAL, GATHER,
+                                            exchange(REMOTE_STREAMING, REPARTITION,
+                                                    values(ImmutableList.of("c1", "c2"),
+                                                            ImmutableList.of()))))))));
         }
         finally {
             assertUpdate("DROP TABLE " + tableName);
@@ -2304,7 +2476,24 @@ public class TestIcebergLogicalPlanner
     protected Session getSessionWithOptimizeMetadataQueries(boolean enabled)
     {
         return Session.builder(super.getSession())
+                .setRuntimeStats(new RuntimeStats())
                 .setCatalogSessionProperty(ICEBERG_CATALOG, PUSHDOWN_FILTER_ENABLED, String.valueOf(enabled))
+                .build();
+    }
+
+    protected Session getSessionWithNewRuntimeStats(Session session)
+    {
+        return Session.builder(session)
+                .setRuntimeStats(new RuntimeStats())
+                .build();
+    }
+
+    protected Session getSessionWithOptimizeMetadataQueriesAndThreshold(boolean enabled, int rowsForMetadataOptimizationThreshold)
+    {
+        return Session.builder(super.getSession())
+                .setRuntimeStats(new RuntimeStats())
+                .setCatalogSessionProperty(ICEBERG_CATALOG, PUSHDOWN_FILTER_ENABLED, String.valueOf(enabled))
+                .setCatalogSessionProperty(ICEBERG_CATALOG, ROWS_FOR_METADATA_OPTIMIZATION_THRESHOLD, String.valueOf(rowsForMetadataOptimizationThreshold))
                 .build();
     }
 

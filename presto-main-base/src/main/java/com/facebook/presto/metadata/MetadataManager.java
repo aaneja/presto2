@@ -83,6 +83,7 @@ import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.analyzer.FunctionsConfig;
 import com.facebook.presto.sql.analyzer.SemanticException;
 import com.facebook.presto.sql.analyzer.TypeSignatureProvider;
+import com.facebook.presto.testing.TestProcedureRegistry;
 import com.facebook.presto.transaction.TransactionManager;
 import com.facebook.presto.type.TypeDeserializer;
 import com.google.common.annotations.VisibleForTesting;
@@ -160,6 +161,7 @@ public class MetadataManager
     private final SessionPropertyManager sessionPropertyManager;
     private final SchemaPropertyManager schemaPropertyManager;
     private final TablePropertyManager tablePropertyManager;
+    private final MaterializedViewPropertyManager materializedViewPropertyManager;
     private final ColumnPropertyManager columnPropertyManager;
     private final AnalyzePropertyManager analyzePropertyManager;
     private final TransactionManager transactionManager;
@@ -174,6 +176,7 @@ public class MetadataManager
             SessionPropertyManager sessionPropertyManager,
             SchemaPropertyManager schemaPropertyManager,
             TablePropertyManager tablePropertyManager,
+            MaterializedViewPropertyManager materializedViewPropertyManager,
             ColumnPropertyManager columnPropertyManager,
             AnalyzePropertyManager analyzePropertyManager,
             TransactionManager transactionManager)
@@ -184,6 +187,7 @@ public class MetadataManager
                 sessionPropertyManager,
                 schemaPropertyManager,
                 tablePropertyManager,
+                materializedViewPropertyManager,
                 columnPropertyManager,
                 analyzePropertyManager,
                 transactionManager,
@@ -197,6 +201,7 @@ public class MetadataManager
             SessionPropertyManager sessionPropertyManager,
             SchemaPropertyManager schemaPropertyManager,
             TablePropertyManager tablePropertyManager,
+            MaterializedViewPropertyManager materializedViewPropertyManager,
             ColumnPropertyManager columnPropertyManager,
             AnalyzePropertyManager analyzePropertyManager,
             TransactionManager transactionManager,
@@ -208,6 +213,7 @@ public class MetadataManager
                 sessionPropertyManager,
                 schemaPropertyManager,
                 tablePropertyManager,
+                materializedViewPropertyManager,
                 columnPropertyManager,
                 analyzePropertyManager,
                 transactionManager,
@@ -222,6 +228,7 @@ public class MetadataManager
             SessionPropertyManager sessionPropertyManager,
             SchemaPropertyManager schemaPropertyManager,
             TablePropertyManager tablePropertyManager,
+            MaterializedViewPropertyManager materializedViewPropertyManager,
             ColumnPropertyManager columnPropertyManager,
             AnalyzePropertyManager analyzePropertyManager,
             TransactionManager transactionManager,
@@ -233,6 +240,7 @@ public class MetadataManager
         this.sessionPropertyManager = requireNonNull(sessionPropertyManager, "sessionPropertyManager is null");
         this.schemaPropertyManager = requireNonNull(schemaPropertyManager, "schemaPropertyManager is null");
         this.tablePropertyManager = requireNonNull(tablePropertyManager, "tablePropertyManager is null");
+        this.materializedViewPropertyManager = requireNonNull(materializedViewPropertyManager, "materializedViewPropertyManager is null");
         this.columnPropertyManager = requireNonNull(columnPropertyManager, "columnPropertyManager is null");
         this.analyzePropertyManager = requireNonNull(analyzePropertyManager, "analyzePropertyManager is null");
         this.transactionManager = requireNonNull(transactionManager, "transactionManager is null");
@@ -281,6 +289,7 @@ public class MetadataManager
                 createTestingSessionPropertyManager(),
                 new SchemaPropertyManager(),
                 new TablePropertyManager(),
+                new MaterializedViewPropertyManager(),
                 new ColumnPropertyManager(),
                 new AnalyzePropertyManager(),
                 transactionManager);
@@ -295,10 +304,27 @@ public class MetadataManager
                 createTestingSessionPropertyManager(),
                 new SchemaPropertyManager(),
                 new TablePropertyManager(),
+                new MaterializedViewPropertyManager(),
                 new ColumnPropertyManager(),
                 new AnalyzePropertyManager(),
                 transactionManager,
                 procedureRegistry);
+    }
+
+    public static MetadataManager createTestMetadataManager(FunctionAndTypeManager functionAndTypeManager)
+    {
+        BlockEncodingManager blockEncodingManager = new BlockEncodingManager();
+        return new MetadataManager(
+                functionAndTypeManager,
+                blockEncodingManager,
+                createTestingSessionPropertyManager(),
+                new SchemaPropertyManager(),
+                new TablePropertyManager(),
+                new MaterializedViewPropertyManager(),
+                new ColumnPropertyManager(),
+                new AnalyzePropertyManager(),
+                functionAndTypeManager.getTransactionManager(),
+                new TestProcedureRegistry());
     }
 
     @Override
@@ -442,7 +468,6 @@ public class MetadataManager
     public TableLayoutResult getLayout(Session session, TableHandle table, Constraint<ColumnHandle> constraint, Optional<Set<ColumnHandle>> desiredColumns)
     {
         long startTime = System.nanoTime();
-        checkArgument(!constraint.getSummary().isNone(), "Cannot get Layout if constraint is none");
 
         ConnectorId connectorId = table.getConnectorId();
         ConnectorTableHandle connectorTable = table.getConnectorHandle();
@@ -1015,14 +1040,16 @@ public class MetadataManager
     }
 
     @Override
-    public DistributedProcedureHandle beginCallDistributedProcedure(Session session, QualifiedObjectName procedureName, TableHandle tableHandle, Object[] arguments)
+    public DistributedProcedureHandle beginCallDistributedProcedure(Session session, QualifiedObjectName procedureName,
+                                                                    TableHandle tableHandle, Object[] arguments,
+                                                                    boolean sourceTableEliminated)
     {
         ConnectorId connectorId = tableHandle.getConnectorId();
         CatalogMetadata catalogMetadata = getCatalogMetadataForWrite(session, connectorId);
 
         ConnectorTableLayoutHandle layout;
         if (!tableHandle.getLayout().isPresent()) {
-            TableLayoutResult result = getLayout(session, tableHandle, Constraint.alwaysTrue(), Optional.empty());
+            TableLayoutResult result = getLayout(session, tableHandle, sourceTableEliminated ? Constraint.alwaysFalse() : Constraint.alwaysTrue(), Optional.empty());
             layout = result.getLayout().getLayoutHandle();
         }
         else {
@@ -1218,7 +1245,99 @@ public class MetadataManager
         metadata.dropMaterializedView(session.toConnectorSession(connectorId), toSchemaTableName(viewName.getSchemaName(), viewName.getObjectName()));
     }
 
-    private MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain)
+    @Override
+    public List<QualifiedObjectName> listMaterializedViews(Session session, QualifiedTablePrefix prefix)
+    {
+        requireNonNull(prefix, "prefix is null");
+
+        Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, transactionManager, prefix.getCatalogName());
+        Set<QualifiedObjectName> materializedViews = new LinkedHashSet<>();
+        if (catalog.isPresent()) {
+            CatalogMetadata catalogMetadata = catalog.get();
+            ConnectorId connectorId = catalogMetadata.getConnectorId();
+            ConnectorMetadata metadata = catalogMetadata.getMetadata();
+            ConnectorSession connectorSession = session.toConnectorSession(connectorId);
+
+            List<SchemaTableName> viewNames;
+            if (prefix.getSchemaName().isPresent()) {
+                viewNames = metadata.listMaterializedViews(connectorSession, prefix.getSchemaName().get());
+            }
+            else {
+                viewNames = new ArrayList<>();
+                for (String schemaName : metadata.listSchemaNames(connectorSession)) {
+                    viewNames.addAll(metadata.listMaterializedViews(connectorSession, schemaName));
+                }
+            }
+
+            // Convert to QualifiedObjectName and filter by prefix
+            for (SchemaTableName viewName : viewNames) {
+                QualifiedObjectName qualifiedName = new QualifiedObjectName(
+                        prefix.getCatalogName(),
+                        viewName.getSchemaName(),
+                        viewName.getTableName());
+                if (prefix.matches(qualifiedName)) {
+                    materializedViews.add(qualifiedName);
+                }
+            }
+        }
+
+        return ImmutableList.copyOf(materializedViews);
+    }
+
+    @Override
+    public Map<QualifiedObjectName, MaterializedViewDefinition> getMaterializedViews(
+            Session session,
+            QualifiedTablePrefix prefix)
+    {
+        requireNonNull(prefix, "prefix is null");
+
+        Optional<CatalogMetadata> catalog = getOptionalCatalogMetadata(session, transactionManager, prefix.getCatalogName());
+        Map<QualifiedObjectName, MaterializedViewDefinition> views = new LinkedHashMap<>();
+
+        if (catalog.isPresent()) {
+            CatalogMetadata catalogMetadata = catalog.get();
+            ConnectorId connectorId = catalogMetadata.getConnectorId();
+            ConnectorMetadata metadata = catalogMetadata.getMetadata();
+            ConnectorSession connectorSession = session.toConnectorSession(connectorId);
+
+            List<SchemaTableName> viewNames;
+            if (prefix.getSchemaName().isPresent()) {
+                viewNames = metadata.listMaterializedViews(connectorSession, prefix.getSchemaName().get());
+
+                if (prefix.getTableName().isPresent()) {
+                    String tableName = prefix.getTableName().get();
+                    viewNames = viewNames.stream()
+                            .filter(name -> name.getTableName().equals(tableName))
+                            .collect(toImmutableList());
+                }
+            }
+            else {
+                viewNames = new ArrayList<>();
+                for (String schemaName : metadata.listSchemaNames(connectorSession)) {
+                    viewNames.addAll(metadata.listMaterializedViews(connectorSession, schemaName));
+                }
+            }
+
+            // Bulk retrieve definitions
+            if (!viewNames.isEmpty()) {
+                Map<SchemaTableName, MaterializedViewDefinition> definitions = metadata.getMaterializedViews(connectorSession, viewNames);
+
+                definitions.forEach((viewName, definition) -> {
+                    views.put(
+                            new QualifiedObjectName(
+                                    prefix.getCatalogName(),
+                                    viewName.getSchemaName(),
+                                    viewName.getTableName()),
+                            definition);
+                });
+            }
+        }
+
+        return ImmutableMap.copyOf(views);
+    }
+
+    @Override
+    public MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain)
     {
         Optional<TableHandle> materializedViewHandle = getOptionalTableHandle(session, transactionManager, materializedViewName, Optional.empty());
 
@@ -1486,6 +1605,12 @@ public class MetadataManager
     }
 
     @Override
+    public MaterializedViewPropertyManager getMaterializedViewPropertyManager()
+    {
+        return materializedViewPropertyManager;
+    }
+
+    @Override
     public ColumnPropertyManager getColumnPropertyManager()
     {
         return columnPropertyManager;
@@ -1611,6 +1736,22 @@ public class MetadataManager
         CatalogMetadata catalogMetadata = getCatalogMetadata(session, connectorId);
         ConnectorMetadata metadata = catalogMetadata.getMetadataFor(connectorId);
         return metadata.getTableLayoutFilterCoverage(tableHandle.getLayout().get(), relevantPartitionColumns);
+    }
+
+    @Override
+    public void dropBranch(Session session, TableHandle tableHandle, String branchName, boolean branchExists)
+    {
+        ConnectorId connectorId = tableHandle.getConnectorId();
+        ConnectorMetadata metadata = getMetadataForWrite(session, connectorId);
+        metadata.dropBranch(session.toConnectorSession(connectorId), tableHandle.getConnectorHandle(), branchName, branchExists);
+    }
+
+    @Override
+    public void dropTag(Session session, TableHandle tableHandle, String tagName, boolean tagExists)
+    {
+        ConnectorId connectorId = tableHandle.getConnectorId();
+        ConnectorMetadata metadata = getMetadataForWrite(session, connectorId);
+        metadata.dropTag(session.toConnectorSession(connectorId), tableHandle.getConnectorHandle(), tagName, tagExists);
     }
 
     @Override

@@ -173,6 +173,7 @@ public class TestAccessControlManager
         accessControlManager.addSystemAccessControlFactory(accessControlFactory);
         accessControlManager.setSystemAccessControl("test", ImmutableMap.of());
         String testQuery = "test_query";
+        Map<String, String> preparedStatements = ImmutableMap.of();
         Map<QualifiedObjectName, ViewDefinition> viewDefinitions = ImmutableMap.of();
         Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions = ImmutableMap.of();
 
@@ -187,6 +188,7 @@ public class TestAccessControlManager
                         Optional.empty()),
                 context,
                 testQuery,
+                preparedStatements,
                 viewDefinitions,
                 materializedViewDefinitions);
         assertEquals(accessControlFactory.getCheckedUserName(), USER_NAME);
@@ -206,6 +208,7 @@ public class TestAccessControlManager
                                 Optional.empty()),
                         context,
                         testQuery,
+                        preparedStatements,
                         viewDefinitions,
                         materializedViewDefinitions));
     }
@@ -306,7 +309,7 @@ public class TestAccessControlManager
                     }
 
                     @Override
-                    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitionMap)
+                    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<String, String> preparedStatements, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitionMap)
                     {
                     }
 
@@ -420,7 +423,7 @@ public class TestAccessControlManager
                 }
 
                 @Override
-                public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
+                public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<String, String> preparedStatements, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
                 {
                     if (!query.equals(identity.getExtraCredentials().get(QUERY_TOKEN_FIELD))) {
                         denyQueryIntegrityCheck();
@@ -572,6 +575,12 @@ public class TestAccessControlManager
         }
 
         @Override
+        public void checkCanCallProcedure(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName procedureName)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public void checkCanSetCatalogSessionProperty(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, String propertyName)
         {
             throw new UnsupportedOperationException();
@@ -585,6 +594,18 @@ public class TestAccessControlManager
 
         @Override
         public void checkCanRevokeTablePrivilege(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, Privilege privilege, SchemaTableName tableName, PrestoPrincipal revokee, boolean grantOptionFor)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void checkCanDropBranch(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
+        {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public void checkCanDropTag(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
         {
             throw new UnsupportedOperationException();
         }

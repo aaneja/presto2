@@ -26,6 +26,7 @@ import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorTableMetadata;
 import com.facebook.presto.spi.Constraint;
 import com.facebook.presto.spi.MaterializedViewDefinition;
+import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.spi.MergeHandle;
 import com.facebook.presto.spi.NewTableLayout;
 import com.facebook.presto.spi.SystemTable;
@@ -404,9 +405,10 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
-    public DistributedProcedureHandle beginCallDistributedProcedure(Session session, QualifiedObjectName procedureName, TableHandle tableHandle, Object[] arguments)
+    public DistributedProcedureHandle beginCallDistributedProcedure(Session session, QualifiedObjectName procedureName,
+                                                                    TableHandle tableHandle, Object[] arguments, boolean sourceTableEliminated)
     {
-        return delegate.beginCallDistributedProcedure(session, procedureName, tableHandle, arguments);
+        return delegate.beginCallDistributedProcedure(session, procedureName, tableHandle, arguments, sourceTableEliminated);
     }
 
     @Override
@@ -473,6 +475,26 @@ public abstract class DelegatingMetadataManager
     public Map<QualifiedObjectName, ViewDefinition> getViews(Session session, QualifiedTablePrefix prefix)
     {
         return delegate.getViews(session, prefix);
+    }
+
+    @Override
+    public List<QualifiedObjectName> listMaterializedViews(Session session, QualifiedTablePrefix prefix)
+    {
+        return delegate.listMaterializedViews(session, prefix);
+    }
+
+    @Override
+    public Map<QualifiedObjectName, MaterializedViewDefinition> getMaterializedViews(
+            Session session,
+            QualifiedTablePrefix prefix)
+    {
+        return delegate.getMaterializedViews(session, prefix);
+    }
+
+    @Override
+    public MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName viewName, TupleDomain<String> baseQueryDomain)
+    {
+        return delegate.getMaterializedViewStatus(session, viewName, baseQueryDomain);
     }
 
     @Override
@@ -663,6 +685,12 @@ public abstract class DelegatingMetadataManager
     }
 
     @Override
+    public MaterializedViewPropertyManager getMaterializedViewPropertyManager()
+    {
+        return delegate.getMaterializedViewPropertyManager();
+    }
+
+    @Override
     public ColumnPropertyManager getColumnPropertyManager()
     {
         return delegate.getColumnPropertyManager();
@@ -678,6 +706,18 @@ public abstract class DelegatingMetadataManager
     public Set<ConnectorCapabilities> getConnectorCapabilities(Session session, ConnectorId catalogName)
     {
         return delegate.getConnectorCapabilities(session, catalogName);
+    }
+
+    @Override
+    public void dropBranch(Session session, TableHandle tableHandle, String branchName, boolean branchExists)
+    {
+        delegate.dropBranch(session, tableHandle, branchName, branchExists);
+    }
+
+    @Override
+    public void dropTag(Session session, TableHandle tableHandle, String tagName, boolean tagExists)
+    {
+        delegate.dropTag(session, tableHandle, tagName, tagExists);
     }
 
     @Override

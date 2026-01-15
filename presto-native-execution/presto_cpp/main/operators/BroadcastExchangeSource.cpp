@@ -77,14 +77,11 @@ BroadcastExchangeSource::request(
   });
 }
 
-folly::F14FastMap<std::string, int64_t> BroadcastExchangeSource::stats() const {
-  return reader_->stats();
-}
-
 folly::SemiFuture<BroadcastExchangeSource::Response>
 BroadcastExchangeSource::requestDataSizes(
     std::chrono::microseconds /*maxWait*/) {
-  return folly::makeTryWith([&]() -> Response {
+  // Deferred execution to avoid blocking the caller thread.
+  return folly::makeSemiFuture().deferValue([this](auto&&) -> Response {
     auto remainingPageSizes = reader_->remainingPageSizes();
 
     // If the source is empty from the start, signal completion to ExchangeQueue
@@ -126,7 +123,7 @@ BroadcastExchangeSource::createExchangeSource(
   try {
     broadcastFileInfo =
         BroadcastFileInfo::deserialize(broadcastInfoJson.value());
-  } catch (const VeloxException& e) {
+  } catch (const VeloxException&) {
     throw;
   } catch (const std::exception& e) {
     VELOX_USER_FAIL("BroadcastInfo deserialization failed: {}", e.what());

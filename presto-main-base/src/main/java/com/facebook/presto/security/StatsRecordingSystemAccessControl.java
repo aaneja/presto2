@@ -99,11 +99,11 @@ public final class StatsRecordingSystemAccessControl
     }
 
     @Override
-    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
+    public void checkQueryIntegrity(Identity identity, AccessControlContext context, String query, Map<String, String> preparedStatements, Map<QualifiedObjectName, ViewDefinition> viewDefinitions, Map<QualifiedObjectName, MaterializedViewDefinition> materializedViewDefinitions)
     {
         long start = System.nanoTime();
         try {
-            delegate.get().checkQueryIntegrity(identity, context, query, viewDefinitions, materializedViewDefinitions);
+            delegate.get().checkQueryIntegrity(identity, context, query, preparedStatements, viewDefinitions, materializedViewDefinitions);
         }
         catch (RuntimeException e) {
             stats.checkQueryIntegrity.recordFailure();
@@ -495,6 +495,24 @@ public final class StatsRecordingSystemAccessControl
     }
 
     @Override
+    public void checkCanCallProcedure(Identity identity, AccessControlContext context, CatalogSchemaTableName procedure)
+    {
+        long start = System.nanoTime();
+        try {
+            delegate.get().checkCanCallProcedure(identity, context, procedure);
+        }
+        catch (RuntimeException e) {
+            stats.checkCanCallProcedure.recordFailure();
+            throw e;
+        }
+        finally {
+            long duration = System.nanoTime() - start;
+            context.getRuntimeStats().addMetricValue("systemAccessControl.checkCanCallProcedure", RuntimeUnit.NANO, duration);
+            stats.checkCanCallProcedure.record(duration);
+        }
+    }
+
+    @Override
     public void checkCanInsertIntoTable(Identity identity, AccessControlContext context, CatalogSchemaTableName table)
     {
         long start = System.nanoTime();
@@ -693,6 +711,42 @@ public final class StatsRecordingSystemAccessControl
     }
 
     @Override
+    public void checkCanDropBranch(Identity identity, AccessControlContext context, CatalogSchemaTableName table)
+    {
+        long start = System.nanoTime();
+        try {
+            delegate.get().checkCanDropBranch(identity, context, table);
+        }
+        catch (RuntimeException e) {
+            stats.checkCanDropBranch.recordFailure();
+            throw e;
+        }
+        finally {
+            long duration = System.nanoTime() - start;
+            context.getRuntimeStats().addMetricValue("systemAccessControl.checkCanDropBranch", RuntimeUnit.NANO, duration);
+            stats.checkCanDropBranch.record(duration);
+        }
+    }
+
+    @Override
+    public void checkCanDropTag(Identity identity, AccessControlContext context, CatalogSchemaTableName table)
+    {
+        long start = System.nanoTime();
+        try {
+            delegate.get().checkCanDropTag(identity, context, table);
+        }
+        catch (RuntimeException e) {
+            stats.checkCanDropTag.recordFailure();
+            throw e;
+        }
+        finally {
+            long duration = System.nanoTime() - start;
+            context.getRuntimeStats().addMetricValue("systemAccessControl.checkCanDropTag", RuntimeUnit.NANO, duration);
+            stats.checkCanDropTag.record(duration);
+        }
+    }
+
+    @Override
     public void checkCanDropConstraint(Identity identity, AccessControlContext context, CatalogSchemaTableName table)
     {
         long start = System.nanoTime();
@@ -790,6 +844,7 @@ public final class StatsRecordingSystemAccessControl
         final SystemAccessControlStats checkCanDropColumn = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanRenameColumn = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanSelectFromColumns = new SystemAccessControlStats();
+        final SystemAccessControlStats checkCanCallProcedure = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanInsertIntoTable = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanDeleteFromTable = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanTruncateTable = new SystemAccessControlStats();
@@ -801,6 +856,8 @@ public final class StatsRecordingSystemAccessControl
         final SystemAccessControlStats checkCanSetCatalogSessionProperty = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanGrantTablePrivilege = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanRevokeTablePrivilege = new SystemAccessControlStats();
+        final SystemAccessControlStats checkCanDropBranch = new SystemAccessControlStats();
+        final SystemAccessControlStats checkCanDropTag = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanDropConstraint = new SystemAccessControlStats();
         final SystemAccessControlStats checkCanAddConstraint = new SystemAccessControlStats();
         final SystemAccessControlStats getRowFilters = new SystemAccessControlStats();
@@ -972,6 +1029,13 @@ public final class StatsRecordingSystemAccessControl
         public SystemAccessControlStats getCheckCanSelectFromColumns()
         {
             return checkCanSelectFromColumns;
+        }
+
+        @Managed
+        @Nested
+        public SystemAccessControlStats getCheckCanCallProcedure()
+        {
+            return checkCanCallProcedure;
         }
 
         @Managed

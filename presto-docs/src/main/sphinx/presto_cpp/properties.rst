@@ -65,19 +65,6 @@ alphabetical order.
   This property is required when running Presto C++ workers because of
   underlying differences in behavior from Java workers.
 
-``native-execution-type-rewrite-enabled``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* **Type:** ``boolean``
-* **Default value:** ``false``
-
-  When set to ``true``:
-    - Custom type names are peeled in the coordinator. Only the actual base type is preserved.
-    - ``CAST(col AS EnumType<T>)`` is rewritten as ``CAST(col AS <T>)``.
-    - ``ENUM_KEY(EnumType<T>)`` is rewritten as ``ELEMENT_AT(MAP(<T>, VARCHAR))``.
-
-  This property can only be enabled with native execution.
-
 ``optimizer.optimize-hash-generation``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -443,6 +430,22 @@ avoid exceeding memory limits for the query.
   only by aborting. This flag is only effective if
   ``shared-arbitrator.global-arbitration-enabled`` is ``true``.
 
+``text-writer-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``true``
+
+  Enables writing data in ``TEXTFILE`` format.
+
+``text-reader-enabled``
+^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``boolean``
+* **Default value:** ``true``
+
+  Enables reading data in ``TEXTFILE`` format.
+
 Cache Properties
 ----------------
 
@@ -528,6 +531,17 @@ The configuration properties of AsyncDataCache and SSD cache are described here.
 
   When enabled, a CRC-based checksum is calculated for each cache entry written to SSD.
   The checksum is stored in the next checkpoint file.
+
+``ssd-cache-max-entries``
+^^^^^^^^^^^^^^^^^^^^^^^^^
+* **Type:** ``integer``
+* **Default value:** ``10000000``
+
+  Maximum number of entries allowed in the SSD cache. A value of 0 means no limit.
+  When the limit is reached, new entry writes will be skipped.
+
+  The default of 10 million entries keeps metadata memory usage around 500MB, as each
+  cache entry uses approximately 50-60 bytes for the key, value, and hash overhead.
 
 ``ssd-cache-read-verification-enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

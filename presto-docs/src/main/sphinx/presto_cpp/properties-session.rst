@@ -120,19 +120,6 @@ Accepts B/KB/MB/GB units. Set to 0B to disable.
 
 This should only be used for debugging purposes.
 
-``native_execution_type_rewrite_enabled``
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-* **Type:** ``boolean``
-* **Default value:** ``false``
-
-When set to ``true``:
-  - Custom type names are peeled in the coordinator. Only the actual base type is preserved.
-  - ``CAST(col AS EnumType<T>)`` is rewritten as ``CAST(col AS <T>)``.
-  - ``ENUM_KEY(EnumType<T>)`` is rewritten as ``ELEMENT_AT(MAP(<T>, VARCHAR))``.
-
-This property can only be enabled with native execution.
-
 ``native_selective_nimble_reader_enabled``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -557,3 +544,27 @@ output for each input batch.
 If this is true, then the protocol::SpatialJoinNode is converted to a
 velox::core::SpatialJoinNode. Otherwise, it is converted to a
 velox::core::NestedLoopJoinNode.
+
+``native_aggregation_compaction_bytes_threshold``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``bigint``
+* **Default value:** ``0``
+
+Native Execution only. Memory threshold in bytes for triggering string compaction
+during global aggregation. When total string storage exceeds this limit and the
+unused memory ratio is high, compaction is triggered to reclaim dead strings.
+Disabled by default (0). Currently only applies to approx_most_frequent aggregate
+with StringView type during global aggregation.
+
+``native_aggregation_compaction_unused_memory_ratio``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* **Type:** ``double``
+* **Minimum value:** ``0``
+* **Maximum value:** ``1``
+* **Default value:** ``0.25``
+
+Native Execution only. Ratio of unused (evicted) bytes to total bytes that triggers
+compaction. The value is in the range of [0, 1). Currently only applies to
+approx_most_frequent aggregate with StringView type during global aggregation.

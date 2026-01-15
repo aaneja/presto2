@@ -214,6 +214,19 @@ class ResponseHandler : public proxygen::HTTPTransactionHandler {
   void setTransaction(proxygen::HTTPTransaction* txn) noexcept override {
     txn_ = CHECK_NOTNULL(txn);
     protocol_ = txn_->getTransport().getCodec().getProtocol();
+    // Track connection usage via sequence number:
+    // - seqNo == 0: First request on this connection
+    // - seqNo > 0: Connection is being reused for subsequent requests
+    // Reuse rate = connection_reuse / (connection_first_use + connection_reuse)
+    if (SystemConfig::instance()->httpClientConnectionReuseCounterEnabled()) {
+      const uint32_t seqNo = txn_->getSequenceNumber();
+      if (seqNo > 0) {
+        RECORD_METRIC_VALUE(kCounterHttpClientConnectionReuse);
+        VLOG(2) << "HttpClient reusing connection, seqNo=" << seqNo;
+      } else {
+        RECORD_METRIC_VALUE(kCounterHttpClientConnectionFirstUse);
+      }
+    }
   }
 
   void detachTransaction() noexcept override {
@@ -248,13 +261,17 @@ class ResponseHandler : public proxygen::HTTPTransactionHandler {
   }
 
   void onEOM() noexcept override {
-    promise_.setValue(std::move(response_));
+    if (!promise_.isFulfilled()) {
+      promise_.setValue(std::move(response_));
+    }
   }
 
   void onUpgrade(proxygen::UpgradeProtocol /* protocol*/) noexcept override {}
 
   void onError(const proxygen::HTTPException& error) noexcept override {
-    promise_.setException(error);
+    if (!promise_.isFulfilled()) {
+      promise_.setException(error);
+    }
   }
 
   void onEgressPaused() noexcept override {}

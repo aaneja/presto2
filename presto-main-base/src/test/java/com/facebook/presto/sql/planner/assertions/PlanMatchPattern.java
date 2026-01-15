@@ -43,6 +43,7 @@ import com.facebook.presto.spi.plan.ProjectNode;
 import com.facebook.presto.spi.plan.SemiJoinNode;
 import com.facebook.presto.spi.plan.SortNode;
 import com.facebook.presto.spi.plan.SpatialJoinNode;
+import com.facebook.presto.spi.plan.TableFinishNode;
 import com.facebook.presto.spi.plan.TableWriterNode;
 import com.facebook.presto.spi.plan.TopNNode;
 import com.facebook.presto.spi.plan.UnionNode;
@@ -60,6 +61,7 @@ import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.iterative.GroupReference;
 import com.facebook.presto.sql.planner.plan.ApplyNode;
 import com.facebook.presto.sql.planner.plan.AssignUniqueId;
+import com.facebook.presto.sql.planner.plan.CallDistributedProcedureNode;
 import com.facebook.presto.sql.planner.plan.EnforceSingleRowNode;
 import com.facebook.presto.sql.planner.plan.ExchangeNode;
 import com.facebook.presto.sql.planner.plan.GroupIdNode;
@@ -656,6 +658,11 @@ public final class PlanMatchPattern
         return values(aliasToIndex, Optional.empty(), Optional.empty());
     }
 
+    public static PlanMatchPattern values(int rowCount)
+    {
+        return values(ImmutableList.of(), nCopies(rowCount, ImmutableList.of()));
+    }
+
     public static PlanMatchPattern values(String... aliases)
     {
         return values(ImmutableList.copyOf(aliases));
@@ -691,6 +698,16 @@ public final class PlanMatchPattern
         return node(EnforceSingleRowNode.class, source);
     }
 
+    public static PlanMatchPattern callDistributedProcedure(PlanMatchPattern source)
+    {
+        return node(CallDistributedProcedureNode.class, source);
+    }
+
+    public static PlanMatchPattern tableFinish(PlanMatchPattern source)
+    {
+        return node(TableFinishNode.class, source);
+    }
+
     public static PlanMatchPattern tableWriter(List<String> columns, List<String> columnNames, PlanMatchPattern source)
     {
         return node(TableWriterNode.class, source).with(new TableWriterMatcher(columns, columnNames));
@@ -699,6 +716,27 @@ public final class PlanMatchPattern
     public static PlanMatchPattern remoteSource(List<PlanFragmentId> sourceFragmentIds, Map<String, Integer> outputSymbolAliases)
     {
         return node(RemoteSourceNode.class).with(new RemoteSourceMatcher(sourceFragmentIds, outputSymbolAliases));
+    }
+
+    public static PlanMatchPattern tableFunction(Consumer<TableFunctionMatcher.Builder> handler, PlanMatchPattern... sources)
+    {
+        TableFunctionMatcher.Builder builder = new TableFunctionMatcher.Builder(sources);
+        handler.accept(builder);
+        return builder.build();
+    }
+
+    public static PlanMatchPattern tableFunctionProcessor(Consumer<TableFunctionProcessorMatcher.Builder> handler, PlanMatchPattern source)
+    {
+        TableFunctionProcessorMatcher.Builder builder = new TableFunctionProcessorMatcher.Builder(source);
+        handler.accept(builder);
+        return builder.build();
+    }
+
+    public static PlanMatchPattern tableFunctionProcessor(Consumer<TableFunctionProcessorMatcher.Builder> handler)
+    {
+        TableFunctionProcessorMatcher.Builder builder = new TableFunctionProcessorMatcher.Builder();
+        handler.accept(builder);
+        return builder.build();
     }
 
     public PlanMatchPattern(List<PlanMatchPattern> sourcePatterns)

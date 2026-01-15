@@ -17,6 +17,8 @@ import com.facebook.airlift.http.server.testing.TestingHttpServer;
 import com.facebook.presto.testing.QueryRunner;
 import com.facebook.presto.tests.AbstractTestQueryFramework;
 import com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.Table;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.rest.RESTCatalog;
@@ -329,7 +331,7 @@ public class TestIcebergMaterializedViewMetadata
             properties2.put(PRESTO_MATERIALIZED_VIEW_ORIGINAL_SQL, "SELECT id FROM test_other_validation_base");
             properties2.put(PRESTO_MATERIALIZED_VIEW_STORAGE_SCHEMA, "test_schema");
             properties2.put(PRESTO_MATERIALIZED_VIEW_STORAGE_TABLE_NAME, "storage_invalid_json");
-            properties2.put(PRESTO_MATERIALIZED_VIEW_BASE_TABLES, "test_schema.test_other_validation_base");
+            properties2.put(PRESTO_MATERIALIZED_VIEW_BASE_TABLES, "[{\"schema\":\"test_schema\", \"table\": \"test_other_validation_base\"}]");
             properties2.put(PRESTO_MATERIALIZED_VIEW_COLUMN_MAPPINGS, "{invalid json here");
             properties2.put(PRESTO_MATERIALIZED_VIEW_OWNER, "test_user");
             properties2.put(PRESTO_MATERIALIZED_VIEW_SECURITY_MODE, "DEFINER");
@@ -356,7 +358,7 @@ public class TestIcebergMaterializedViewMetadata
             properties3.put(PRESTO_MATERIALIZED_VIEW_ORIGINAL_SQL, "SELECT id FROM nonexistent_table");
             properties3.put(PRESTO_MATERIALIZED_VIEW_STORAGE_SCHEMA, "test_schema");
             properties3.put(PRESTO_MATERIALIZED_VIEW_STORAGE_TABLE_NAME, "storage_nonexistent_base");
-            properties3.put(PRESTO_MATERIALIZED_VIEW_BASE_TABLES, "test_schema.nonexistent_table");
+            properties3.put(PRESTO_MATERIALIZED_VIEW_BASE_TABLES, "[{\"schema\":\"test_schema\", \"table\": \"nonexistent_table\"}]");
             properties3.put(PRESTO_MATERIALIZED_VIEW_COLUMN_MAPPINGS, "[]");
             properties3.put(PRESTO_MATERIALIZED_VIEW_OWNER, "test_user");
             properties3.put(PRESTO_MATERIALIZED_VIEW_SECURITY_MODE, "DEFINER");
@@ -385,7 +387,7 @@ public class TestIcebergMaterializedViewMetadata
         assertUpdate("INSERT INTO existing_storage_table VALUES (1, 100)", 1);
 
         assertQueryFails("CREATE MATERIALIZED VIEW test_mv_duplicate_storage " +
-                        "WITH (materialized_view_storage_table_name = 'existing_storage_table') " +
+                        "WITH (storage_table = 'existing_storage_table') " +
                         "AS SELECT id, name FROM test_other_validation_base",
                 ".*already exists.*");
 
@@ -565,7 +567,7 @@ public class TestIcebergMaterializedViewMetadata
             properties2.put("presto.materialized_view.original_sql", "SELECT id, name FROM test_validation_base");
             properties2.put("presto.materialized_view.storage_schema", "test_schema");
             properties2.put("presto.materialized_view.storage_table_name", "storage2");
-            properties2.put("presto.materialized_view.base_tables", "test_schema.test_validation_base");
+            properties2.put("presto.materialized_view.base_tables", "[{\"schema\":\"test_schema\", \"table\": \"test_validation_base\"}]");
 
             catalog.buildView(viewId2)
                     .withSchema(new org.apache.iceberg.Schema(
@@ -586,7 +588,7 @@ public class TestIcebergMaterializedViewMetadata
             properties3.put("presto.materialized_view.format_version", CURRENT_MATERIALIZED_VIEW_FORMAT_VERSION + "");
             properties3.put("presto.materialized_view.original_sql", "SELECT id, name FROM test_validation_base");
             properties3.put("presto.materialized_view.storage_table_name", "storage3");
-            properties3.put("presto.materialized_view.base_tables", "test_schema.test_validation_base");
+            properties3.put("presto.materialized_view.base_tables", "[{\"schema\":\"test_schema\", \"table\": \"test_validation_base\"}]");
             properties3.put("presto.materialized_view.column_mappings", "[]");
 
             catalog.buildView(viewId3)
@@ -608,7 +610,7 @@ public class TestIcebergMaterializedViewMetadata
             properties4.put("presto.materialized_view.format_version", CURRENT_MATERIALIZED_VIEW_FORMAT_VERSION + "");
             properties4.put("presto.materialized_view.original_sql", "SELECT id, name FROM test_validation_base");
             properties4.put("presto.materialized_view.storage_schema", "test_schema");
-            properties4.put("presto.materialized_view.base_tables", "test_schema.test_validation_base");
+            properties4.put("presto.materialized_view.base_tables", "[{\"schema\":\"test_schema\", \"table\": \"test_validation_base\"}]");
             properties4.put("presto.materialized_view.column_mappings", "[]");
 
             catalog.buildView(viewId4)
@@ -643,5 +645,115 @@ public class TestIcebergMaterializedViewMetadata
         properties.put(PRESTO_MATERIALIZED_VIEW_OWNER, "test_user");
         properties.put(PRESTO_MATERIALIZED_VIEW_SECURITY_MODE, "DEFINER");
         return properties;
+    }
+
+    @Test
+    public void testBaseTableSnapshotTracking()
+            throws Exception
+    {
+        assertUpdate("CREATE TABLE test_freshtime_base (id BIGINT, value BIGINT)");
+        assertUpdate("INSERT INTO test_freshtime_base VALUES (1, 100)", 1);
+
+        assertUpdate("CREATE MATERIALIZED VIEW test_freshtime_mv AS SELECT id, value FROM test_freshtime_base");
+
+        RESTCatalog catalog = new RESTCatalog();
+        Map<String, String> catalogProps = new HashMap<>();
+        catalogProps.put("uri", serverUri);
+        catalogProps.put("warehouse", warehouseLocation.getAbsolutePath());
+        catalog.initialize("test_catalog", catalogProps);
+
+        try {
+            assertUpdate("REFRESH MATERIALIZED VIEW test_freshtime_mv", 1);
+
+            Table baseTable = catalog.loadTable(
+                    TableIdentifier.of(Namespace.of("test_schema"), "test_freshtime_base"));
+            long recordedSnapshotId = baseTable.currentSnapshot().snapshotId();
+            long recordedSnapshotTimestamp = baseTable.currentSnapshot().timestampMillis();
+
+            TableIdentifier viewId = TableIdentifier.of(Namespace.of("test_schema"), "test_freshtime_mv");
+            View view = catalog.loadView(viewId);
+            String storedSnapshotId = view.properties().get("presto.materialized_view.base_snapshot.test_schema.test_freshtime_base");
+            assertEquals(Long.parseLong(storedSnapshotId), recordedSnapshotId,
+                    "MV should store the base table snapshot ID at refresh time");
+
+            Thread.sleep(100);
+
+            assertUpdate("INSERT INTO test_freshtime_base VALUES (2, 200)", 1);
+
+            baseTable.refresh();
+            long newSnapshotId = baseTable.currentSnapshot().snapshotId();
+            long newSnapshotTimestamp = baseTable.currentSnapshot().timestampMillis();
+
+            assertNotEquals(newSnapshotId, recordedSnapshotId,
+                    "New snapshot should have different ID");
+            assertTrue(newSnapshotTimestamp > recordedSnapshotTimestamp,
+                    "New snapshot timestamp should be later than recorded timestamp");
+
+            assertQuery(
+                    "SELECT freshness_state FROM information_schema.materialized_views " +
+                            "WHERE table_catalog = 'iceberg' AND table_schema = 'test_schema' AND table_name = 'test_freshtime_mv'",
+                    "SELECT 'PARTIALLY_MATERIALIZED'");
+
+            Snapshot recordedSnapshot = baseTable.snapshot(recordedSnapshotId);
+            assertNotNull(recordedSnapshot, "Recorded snapshot should still exist");
+            assertEquals(recordedSnapshot.timestampMillis(), recordedSnapshotTimestamp,
+                    "Recorded snapshot timestamp should not have changed");
+
+            assertUpdate("REFRESH MATERIALIZED VIEW test_freshtime_mv", 2);
+
+            view = catalog.loadView(viewId);
+            String newStoredSnapshotId = view.properties().get("presto.materialized_view.base_snapshot.test_schema.test_freshtime_base");
+            assertEquals(Long.parseLong(newStoredSnapshotId), newSnapshotId,
+                    "After refresh, MV should store the new base table snapshot ID");
+
+            assertQuery(
+                    "SELECT freshness_state FROM information_schema.materialized_views " +
+                            "WHERE table_catalog = 'iceberg' AND table_schema = 'test_schema' AND table_name = 'test_freshtime_mv'",
+                    "SELECT 'FULLY_MATERIALIZED'");
+        }
+        finally {
+            catalog.close();
+        }
+
+        assertUpdate("DROP MATERIALIZED VIEW test_freshtime_mv");
+        assertUpdate("DROP TABLE test_freshtime_base");
+    }
+
+    @Test
+    public void testStalenessPropertiesStoredInView()
+            throws Exception
+    {
+        assertUpdate("CREATE TABLE test_staleness_props_base (id BIGINT, value BIGINT)");
+        assertUpdate("INSERT INTO test_staleness_props_base VALUES (1, 100)", 1);
+
+        // Create MV with staleness properties
+        assertUpdate("CREATE MATERIALIZED VIEW test_staleness_props_mv " +
+                "WITH (stale_read_behavior = 'FAIL', staleness_window = '1h') " +
+                "AS SELECT id, value FROM test_staleness_props_base");
+
+        RESTCatalog catalog = new RESTCatalog();
+        Map<String, String> catalogProps = new HashMap<>();
+        catalogProps.put("uri", serverUri);
+        catalogProps.put("warehouse", warehouseLocation.getAbsolutePath());
+        catalog.initialize("test_catalog", catalogProps);
+
+        try {
+            TableIdentifier viewId = TableIdentifier.of(Namespace.of("test_schema"), "test_staleness_props_mv");
+            View view = catalog.loadView(viewId);
+
+            String staleReadBehavior = view.properties().get("presto.materialized_view.stale_read_behavior");
+            String stalenessWindow = view.properties().get("presto.materialized_view.staleness_window");
+
+            assertEquals(staleReadBehavior, "FAIL",
+                    "stale_read_behavior should be stored in view properties");
+            assertEquals(stalenessWindow, "1.00h",
+                    "staleness_window should be stored in view properties");
+        }
+        finally {
+            catalog.close();
+        }
+
+        assertUpdate("DROP MATERIALIZED VIEW test_staleness_props_mv");
+        assertUpdate("DROP TABLE test_staleness_props_base");
     }
 }

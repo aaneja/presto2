@@ -45,15 +45,18 @@ import static com.facebook.presto.plugin.base.security.TableAccessControlRule.Ta
 import static com.facebook.presto.plugin.base.security.TableAccessControlRule.TablePrivilege.UPDATE;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyAddColumn;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyAddConstraint;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyCallProcedure;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateTable;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyCreateViewWithSelect;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDeleteTable;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropBranch;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropColumn;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropConstraint;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropSchema;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropTable;
+import static com.facebook.presto.spi.security.AccessDeniedException.denyDropTag;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyDropView;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyGrantTablePrivilege;
 import static com.facebook.presto.spi.security.AccessDeniedException.denyInsertTable;
@@ -77,6 +80,7 @@ public class FileBasedAccessControl
     private final List<SchemaAccessControlRule> schemaRules;
     private final List<TableAccessControlRule> tableRules;
     private final List<SessionPropertyAccessControlRule> sessionPropertyRules;
+    private final List<ProcedureAccessControlRule> procedureRules;
 
     @Inject
     public FileBasedAccessControl(FileBasedAccessControlConfig config)
@@ -86,24 +90,31 @@ public class FileBasedAccessControl
         this.schemaRules = rules.getSchemaRules();
         this.tableRules = rules.getTableRules();
         this.sessionPropertyRules = rules.getSessionPropertyRules();
+        this.procedureRules = rules.getProcedureRules();
     }
 
     @Override
     public void checkCanCreateSchema(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, String schemaName)
     {
-        denyCreateSchema(schemaName);
+        if (!isDatabaseOwner(identity, schemaName)) {
+            denyCreateSchema(schemaName);
+        }
     }
 
     @Override
     public void checkCanDropSchema(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, String schemaName)
     {
-        denyDropSchema(schemaName);
+        if (!isDatabaseOwner(identity, schemaName)) {
+            denyDropSchema(schemaName);
+        }
     }
 
     @Override
     public void checkCanRenameSchema(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, String schemaName, String newSchemaName)
     {
-        denyRenameSchema(schemaName, newSchemaName);
+        if (!isDatabaseOwner(identity, schemaName)) {
+            denyRenameSchema(schemaName, newSchemaName);
+        }
     }
 
     @Override
@@ -216,6 +227,14 @@ public class FileBasedAccessControl
         // TODO: Implement column level permissions
         if (!checkTablePermission(identity, tableName, SELECT)) {
             denySelectTable(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanCallProcedure(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName procedureName)
+    {
+        if (!checkProcedurePermission(identity, procedureName, ProcedureAccessControlRule.ProcedurePrivilege.EXECUTE)) {
+            denyCallProcedure(procedureName.toString());
         }
     }
 
@@ -352,6 +371,22 @@ public class FileBasedAccessControl
     }
 
     @Override
+    public void checkCanDropBranch(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
+    {
+        if (!checkTablePermission(identity, tableName, OWNERSHIP)) {
+            denyDropBranch(tableName.toString());
+        }
+    }
+
+    @Override
+    public void checkCanDropTag(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
+    {
+        if (!checkTablePermission(identity, tableName, OWNERSHIP)) {
+            denyDropTag(tableName.toString());
+        }
+    }
+
+    @Override
     public void checkCanDropConstraint(ConnectorTransactionHandle transactionHandle, ConnectorIdentity identity, AccessControlContext context, SchemaTableName tableName)
     {
         if (!checkTablePermission(identity, tableName, OWNERSHIP)) {
@@ -400,6 +435,17 @@ public class FileBasedAccessControl
             Optional<Set<TablePrivilege>> tablePrivileges = rule.match(identity.getUser(), tableName);
             if (tablePrivileges.isPresent()) {
                 return tablePrivileges.get().containsAll(ImmutableSet.copyOf(requiredPrivileges));
+            }
+        }
+        return false;
+    }
+
+    private boolean checkProcedurePermission(ConnectorIdentity identity, SchemaTableName procedureName, ProcedureAccessControlRule.ProcedurePrivilege... requiredPrivileges)
+    {
+        for (ProcedureAccessControlRule rule : procedureRules) {
+            Optional<Set<ProcedureAccessControlRule.ProcedurePrivilege>> procedurePrivileges = rule.match(identity.getUser(), procedureName);
+            if (procedurePrivileges.isPresent()) {
+                return procedurePrivileges.get().containsAll(ImmutableSet.copyOf(requiredPrivileges));
             }
         }
         return false;

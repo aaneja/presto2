@@ -23,6 +23,7 @@ import com.facebook.airlift.units.MaxDataSize;
 import com.facebook.presto.CompressionCodec;
 import com.facebook.presto.common.function.OperatorType;
 import com.facebook.presto.common.resourceGroups.QueryType;
+import com.facebook.presto.spi.MaterializedViewStaleReadBehavior;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.function.FunctionMetadata;
 import com.facebook.presto.spi.security.ViewSecurity;
@@ -230,6 +231,7 @@ public class FeaturesConfig
     private boolean legacyMaterializedViewRefresh = true;
     private boolean allowLegacyMaterializedViewsToggle;
     private boolean materializedViewAllowFullRefreshEnabled;
+    private MaterializedViewStaleReadBehavior materializedViewStaleReadBehavior = MaterializedViewStaleReadBehavior.USE_VIEW_QUERY;
 
     private AggregationIfToFilterRewriteStrategy aggregationIfToFilterRewriteStrategy = AggregationIfToFilterRewriteStrategy.DISABLED;
     private String analyzerType = "BUILTIN";
@@ -249,6 +251,7 @@ public class FeaturesConfig
 
     private boolean pushRemoteExchangeThroughGroupId;
     private boolean isOptimizeMultipleApproxPercentileOnSameFieldEnabled = true;
+    private boolean isOptimizeMultipleApproxDistinctOnSameTypeEnabled;
     private boolean nativeExecutionEnabled;
     private boolean disableTimeStampWithTimeZoneForNative;
     private boolean disableIPAddressForNative;
@@ -317,13 +320,13 @@ public class FeaturesConfig
     private boolean prestoSparkExecutionEnvironment;
     private boolean singleNodeExecutionEnabled;
     private boolean nativeExecutionScaleWritersThreadsEnabled;
-    private boolean nativeExecutionTypeRewriteEnabled;
     private String expressionOptimizerName = DEFAULT_EXPRESSION_OPTIMIZER_NAME;
     private boolean addExchangeBelowPartialAggregationOverGroupId;
     private boolean addDistinctBelowSemiJoinBuild;
     private boolean pushdownSubfieldForMapFunctions = true;
     private long maxSerializableObjectSize = 1000;
     private boolean utilizeUniquePropertyInQueryPlanning = true;
+    private String expressionOptimizerUsedInRowExpressionRewrite = "";
 
     private boolean builtInSidecarFunctionsEnabled;
 
@@ -2227,6 +2230,19 @@ public class FeaturesConfig
         return this;
     }
 
+    public MaterializedViewStaleReadBehavior getMaterializedViewStaleReadBehavior()
+    {
+        return materializedViewStaleReadBehavior;
+    }
+
+    @Config("materialized-view-stale-read-behavior")
+    @ConfigDescription("Default behavior when reading from a stale materialized view (FAIL or USE_VIEW_QUERY)")
+    public FeaturesConfig setMaterializedViewStaleReadBehavior(MaterializedViewStaleReadBehavior value)
+    {
+        this.materializedViewStaleReadBehavior = value;
+        return this;
+    }
+
     public boolean isVerboseRuntimeStatsEnabled()
     {
         return verboseRuntimeStatsEnabled;
@@ -2423,6 +2439,19 @@ public class FeaturesConfig
     public FeaturesConfig setOptimizeMultipleApproxPercentileOnSameFieldEnabled(boolean isOptimizeMultipleApproxPercentileOnSameFieldEnabled)
     {
         this.isOptimizeMultipleApproxPercentileOnSameFieldEnabled = isOptimizeMultipleApproxPercentileOnSameFieldEnabled;
+        return this;
+    }
+
+    public boolean isOptimizeMultipleApproxDistinctOnSameTypeEnabled()
+    {
+        return isOptimizeMultipleApproxDistinctOnSameTypeEnabled;
+    }
+
+    @Config("optimizer.optimize-multiple-approx-distinct-on-same-type")
+    @ConfigDescription("Enable combining individual approx_distinct calls on expressions of the same type using set_agg")
+    public FeaturesConfig setOptimizeMultipleApproxDistinctOnSameTypeEnabled(boolean isOptimizeMultipleApproxDistinctOnSameTypeEnabled)
+    {
+        this.isOptimizeMultipleApproxDistinctOnSameTypeEnabled = isOptimizeMultipleApproxDistinctOnSameTypeEnabled;
         return this;
     }
 
@@ -3165,18 +3194,6 @@ public class FeaturesConfig
         return this;
     }
 
-    public boolean isNativeExecutionTypeRewriteEnabled()
-    {
-        return nativeExecutionTypeRewriteEnabled;
-    }
-
-    @Config("native-execution-type-rewrite-enabled")
-    public FeaturesConfig setNativeExecutionTypeRewriteEnabled(boolean nativeExecutionTypeRewriteEnabled)
-    {
-        this.nativeExecutionTypeRewriteEnabled = nativeExecutionTypeRewriteEnabled;
-        return this;
-    }
-
     public String getExpressionOptimizerName()
     {
         return expressionOptimizerName;
@@ -3253,6 +3270,19 @@ public class FeaturesConfig
     public boolean isUtilizeUniquePropertyInQueryPlanning()
     {
         return utilizeUniquePropertyInQueryPlanning;
+    }
+
+    public String getExpressionOptimizerUsedInRowExpressionRewrite()
+    {
+        return expressionOptimizerUsedInRowExpressionRewrite;
+    }
+
+    @Config("optimizer.expression-optimizer-used-in-expression-rewrite")
+    @ConfigDescription("The name of expression optimizer to be used in row expression rewrite")
+    public FeaturesConfig setExpressionOptimizerUsedInRowExpressionRewrite(String expressionOptimizerUsedInRowExpressionRewrite)
+    {
+        this.expressionOptimizerUsedInRowExpressionRewrite = expressionOptimizerUsedInRowExpressionRewrite;
+        return this;
     }
 
     @Config("max_serializable_object_size")

@@ -488,7 +488,7 @@ SessionProperties::SessionProperties() {
       kRequestDataSizesMaxWaitSec,
       "Maximum wait time for exchange long poll requests in seconds.",
       INTEGER(),
-      10,
+      false,
       QueryConfig::kRequestDataSizesMaxWaitSec,
       std::to_string(c.requestDataSizesMaxWaitSec()));
 
@@ -496,7 +496,7 @@ SessionProperties::SessionProperties() {
       kNativeQueryMemoryReclaimerPriority,
       "Memory pool reclaimer priority.",
       INTEGER(),
-      2147483647,
+      false,
       QueryConfig::kQueryMemoryReclaimerPriority,
       std::to_string(c.queryMemoryReclaimerPriority()));
 
@@ -504,7 +504,7 @@ SessionProperties::SessionProperties() {
       kMaxNumSplitsListenedTo,
       "Maximum number of splits to listen to by SplitListener on native workers.",
       INTEGER(),
-      0,
+      true,
       QueryConfig::kMaxNumSplitsListenedTo,
       std::to_string(c.maxNumSplitsListenedTo()));
 
@@ -547,9 +547,9 @@ SessionProperties::SessionProperties() {
 
   addSessionProperty(
       kPreferredOutputBatchBytes,
-      "Prefered memory budget for operator output batches. Used in tandem with average row size estimates when available.",
+      "Preferred memory budget for operator output batches. Used in tandem with average row size estimates when available.",
       BIGINT(),
-      10UL * 1048576,
+      true,
       QueryConfig::kPreferredOutputBatchBytes,
       std::to_string(c.preferredOutputBatchBytes()));
 
@@ -557,7 +557,7 @@ SessionProperties::SessionProperties() {
       kPreferredOutputBatchRows,
       "Preferred row count per operator output batch. Used when average row size estimates are unknown.",
       INTEGER(),
-      1024,
+      true,
       QueryConfig::kPreferredOutputBatchRows,
       std::to_string(c.preferredOutputBatchRows()));
 
@@ -565,7 +565,7 @@ SessionProperties::SessionProperties() {
       kMaxOutputBatchRows,
       "Upperbound for row count per output batch, used together with preferred_output_batch_bytes and average row size estimates.",
       INTEGER(),
-      10'000,
+      true,
       QueryConfig::kMaxOutputBatchRows,
       std::to_string(c.maxOutputBatchRows()));
 
@@ -586,6 +586,29 @@ SessionProperties::SessionProperties() {
       false,
       std::nullopt,
       "true");
+
+  addSessionProperty(
+      kAggregationCompactionBytesThreshold,
+      "Memory threshold in bytes for triggering string compaction during global "
+      "aggregation. When total string storage exceeds this limit with high unused "
+      "memory ratio, compaction is triggered to reclaim dead strings. Disabled by "
+      "default (0). NOTE: Currently only applies to approx_most_frequent aggregate "
+      "with StringView type during global aggregation. May extend to other aggregates.",
+      BIGINT(),
+      false,
+      QueryConfig::kAggregationCompactionBytesThreshold,
+      std::to_string(c.aggregationCompactionBytesThreshold()));
+
+  addSessionProperty(
+      kAggregationCompactionUnusedMemoryRatio,
+      "Ratio of unused (evicted) bytes to total bytes that triggers compaction. "
+      "The value is in the range of [0, 1). Default is 0.25. NOTE: Currently only applies "
+      "to approx_most_frequent aggregate with StringView type during global "
+      "aggregation. May extend to other aggregates.",
+      DOUBLE(),
+      false,
+      QueryConfig::kAggregationCompactionUnusedMemoryRatio,
+      std::to_string(c.aggregationCompactionUnusedMemoryRatio()));
 }
 
 const std::string SessionProperties::toVeloxConfig(

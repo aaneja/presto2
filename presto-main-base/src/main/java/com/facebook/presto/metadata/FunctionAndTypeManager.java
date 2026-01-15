@@ -34,6 +34,7 @@ import com.facebook.presto.common.type.TypeSignatureParameter;
 import com.facebook.presto.common.type.TypeWithName;
 import com.facebook.presto.common.type.UserDefinedType;
 import com.facebook.presto.operator.window.WindowFunctionSupplier;
+import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.NodeManager;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.StandardErrorCode;
@@ -56,6 +57,8 @@ import com.facebook.presto.spi.function.SqlFunctionHandle;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlFunctionSupplier;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
+import com.facebook.presto.spi.function.table.ConnectorTableFunctionHandle;
+import com.facebook.presto.spi.function.table.TableFunctionProcessorProvider;
 import com.facebook.presto.spi.type.TypeManagerContext;
 import com.facebook.presto.spi.type.TypeManagerFactory;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
@@ -92,8 +95,10 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
+import static com.facebook.presto.SystemSessionProperties.getNonBuiltInFunctionNamespacesToListFunctions;
 import static com.facebook.presto.SystemSessionProperties.isExperimentalFunctionsEnabled;
 import static com.facebook.presto.SystemSessionProperties.isListBuiltInFunctionsOnly;
 import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
@@ -105,6 +110,7 @@ import static com.facebook.presto.metadata.FunctionSignatureMatcher.constructFun
 import static com.facebook.presto.metadata.FunctionSignatureMatcher.decideAndThrow;
 import static com.facebook.presto.metadata.SessionFunctionHandle.SESSION_NAMESPACE;
 import static com.facebook.presto.metadata.SignatureBinder.applyBoundVariables;
+import static com.facebook.presto.spi.StandardErrorCode.ALREADY_EXISTS;
 import static com.facebook.presto.spi.StandardErrorCode.AMBIGUOUS_FUNCTION_CALL;
 import static com.facebook.presto.spi.StandardErrorCode.FUNCTION_IMPLEMENTATION_MISSING;
 import static com.facebook.presto.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
@@ -160,6 +166,7 @@ public class FunctionAndTypeManager
     private final AtomicReference<Supplier<Map<String, ParametricType>>> servingTypeManagerParametricTypesSupplier;
     private final BuiltInWorkerFunctionNamespaceManager builtInWorkerFunctionNamespaceManager;
     private final BuiltInPluginFunctionNamespaceManager builtInPluginFunctionNamespaceManager;
+    private final ConcurrentHashMap<ConnectorId, Function<ConnectorTableFunctionHandle, TableFunctionProcessorProvider>> tableFunctionProcessorProviderMap = new ConcurrentHashMap<>();
     private final FunctionsConfig functionsConfig;
     private final Set<Type> types;
 
@@ -544,8 +551,10 @@ public class FunctionAndTypeManager
             functions.addAll(builtInWorkerFunctionNamespaceManager.listFunctions(likePattern, escape).stream().collect(toImmutableList()));
         }
         else {
+            Set<String> catalogsToListFunction = getNonBuiltInFunctionNamespacesToListFunctions(session);
             functions.addAll(SessionFunctionUtils.listFunctions(session.getSessionFunctions()));
             functions.addAll(functionNamespaceManagers.values().stream()
+                    .filter(x -> x instanceof BuiltInTypeAndFunctionNamespaceManager || catalogsToListFunction.isEmpty() || catalogsToListFunction.contains(x.getCatalogName()))
                     .flatMap(manager -> manager.listFunctions(likePattern, escape).stream())
                     .collect(toImmutableList()));
             functions.addAll(builtInPluginFunctionNamespaceManager.listFunctions(likePattern, escape).stream().collect(toImmutableList()));
@@ -704,6 +713,24 @@ public class FunctionAndTypeManager
         return functionNamespaceManager.get().getScalarFunctionImplementation(functionHandle);
     }
 
+    public TableFunctionProcessorProvider getTableFunctionProcessorProvider(TableFunctionHandle tableFunctionHandle)
+    {
+        return tableFunctionProcessorProviderMap.get(tableFunctionHandle.getConnectorId()).apply(tableFunctionHandle.getFunctionHandle());
+    }
+
+    public void addTableFunctionProcessorProvider(ConnectorId connectorId, Function<ConnectorTableFunctionHandle, TableFunctionProcessorProvider> tableFunctionProcessorProvider)
+    {
+        if (tableFunctionProcessorProviderMap.putIfAbsent(connectorId, tableFunctionProcessorProvider) != null) {
+            throw new PrestoException(ALREADY_EXISTS,
+                    format("TableFuncitonProcessorProvider already exists for connectorId %s. Overwriting is not supported.", connectorId.getCatalogName()));
+        }
+    }
+
+    public void removeTableFunctionProcessorProvider(ConnectorId connectorId)
+    {
+        tableFunctionProcessorProviderMap.remove(connectorId);
+    }
+
     public AggregationFunctionImplementation getAggregateFunctionImplementation(FunctionHandle functionHandle)
     {
         if (isBuiltInPluginFunctionHandle(functionHandle)) {
@@ -853,6 +880,11 @@ public class FunctionAndTypeManager
     public CatalogSchemaName getDefaultNamespace()
     {
         return defaultNamespace;
+    }
+
+    public HandleResolver getHandleResolver()
+    {
+        return handleResolver;
     }
 
     protected Type getType(UserDefinedType userDefinedType)

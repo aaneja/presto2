@@ -210,8 +210,8 @@ public class TestLogicalPlanner
                         procedures.add(new TableDataRewriteDistributedProcedure("system", "distributed_fun",
                                 arguments,
                                 (session, transactionContext, procedureHandle, fragments) -> null,
-                                (transactionContext, procedureHandle, fragments) -> {},
-                                TestProcedureRegistry.TestProcedureContext::new));
+                                (session, transactionContext, procedureHandle, fragments) -> {},
+                                ignored -> new TestProcedureRegistry.TestProcedureContext()));
 
                         return new Connector()
                         {
@@ -1801,6 +1801,16 @@ public class TestLogicalPlanner
                                                                         any(
                                                                                 tableScan("orders", ImmutableMap.of("totalprice", "totalprice"))))))
                                                         .withAlias("row_num", new RowNumberSymbolMatcher()))))));
+    }
+
+    @Test
+    public void testRewriteExcludeColumnsFunctionToProjection()
+    {
+        assertPlan("SELECT *\n" +
+                        "FROM TABLE(system.builtin.exclude_columns(\n" +
+                        "    INPUT => TABLE(orders),\n" +
+                        "    COLUMNS => DESCRIPTOR(comment)))\n",
+                output(tableScan("orders")));
     }
 
     private Session noJoinReordering()

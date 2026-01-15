@@ -27,6 +27,7 @@ import com.facebook.presto.execution.scheduler.NodeSchedulerConfig.ResourceAware
 import com.facebook.presto.execution.warnings.WarningCollectorConfig;
 import com.facebook.presto.memory.MemoryManagerConfig;
 import com.facebook.presto.memory.NodeMemoryConfig;
+import com.facebook.presto.spi.MaterializedViewStaleReadBehavior;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.eventlistener.CTEInformation;
 import com.facebook.presto.spi.security.ViewSecurity;
@@ -59,6 +60,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
@@ -79,8 +81,8 @@ import static com.facebook.presto.sql.analyzer.FeaturesConfig.JoinReorderingStra
 import static com.facebook.presto.sql.analyzer.FeaturesConfig.PartialAggregationStrategy.ALWAYS;
 import static com.facebook.presto.sql.analyzer.FeaturesConfig.PartialAggregationStrategy.NEVER;
 import static com.facebook.presto.sql.analyzer.FeaturesConfig.parseQueryTypesFromString;
-import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.lang.Boolean.TRUE;
 import static java.lang.Math.min;
 import static java.lang.String.format;
@@ -207,6 +209,7 @@ public final class SystemSessionProperties
     public static final String OPTIMIZED_REPARTITIONING_ENABLED = "optimized_repartitioning";
     public static final String AGGREGATION_PARTITIONING_MERGING_STRATEGY = "aggregation_partitioning_merging_strategy";
     public static final String LIST_BUILT_IN_FUNCTIONS_ONLY = "list_built_in_functions_only";
+    public static final String NON_BUILT_IN_FUNCTION_NAMESPACES_TO_LIST_FUNCTIONS = "non_built_in_function_namespaces_to_list_functions";
     public static final String PARTITIONING_PRECISION_STRATEGY = "partitioning_precision_strategy";
     public static final String EXPERIMENTAL_FUNCTIONS_ENABLED = "experimental_functions_enabled";
     public static final String OPTIMIZE_COMMON_SUB_EXPRESSIONS = "optimize_common_sub_expressions";
@@ -247,6 +250,7 @@ public final class SystemSessionProperties
     public static final String QUERY_OPTIMIZATION_WITH_MATERIALIZED_VIEW_ENABLED = "query_optimization_with_materialized_view_enabled";
     public static final String LEGACY_MATERIALIZED_VIEWS = "legacy_materialized_views";
     public static final String MATERIALIZED_VIEW_ALLOW_FULL_REFRESH_ENABLED = "materialized_view_allow_full_refresh_enabled";
+    public static final String MATERIALIZED_VIEW_STALE_READ_BEHAVIOR = "materialized_view_stale_read_behavior";
     public static final String AGGREGATION_IF_TO_FILTER_REWRITE_STRATEGY = "aggregation_if_to_filter_rewrite_strategy";
     public static final String JOINS_NOT_NULL_INFERENCE_STRATEGY = "joins_not_null_inference_strategy";
     public static final String RESOURCE_AWARE_SCHEDULING_STRATEGY = "resource_aware_scheduling_strategy";
@@ -283,6 +287,7 @@ public final class SystemSessionProperties
     public static final String LEAF_NODE_LIMIT_ENABLED = "leaf_node_limit_enabled";
     public static final String PUSH_REMOTE_EXCHANGE_THROUGH_GROUP_ID = "push_remote_exchange_through_group_id";
     public static final String OPTIMIZE_MULTIPLE_APPROX_PERCENTILE_ON_SAME_FIELD = "optimize_multiple_approx_percentile_on_same_field";
+    public static final String OPTIMIZE_MULTIPLE_APPROX_DISTINCT_ON_SAME_TYPE = "optimize_multiple_approx_distinct_on_same_type";
     public static final String RANDOMIZE_OUTER_JOIN_NULL_KEY = "randomize_outer_join_null_key";
     public static final String RANDOMIZE_OUTER_JOIN_NULL_KEY_STRATEGY = "randomize_outer_join_null_key_strategy";
     public static final String RANDOMIZE_OUTER_JOIN_NULL_KEY_NULL_RATIO_THRESHOLD = "randomize_outer_join_null_key_null_ratio_threshold";
@@ -351,6 +356,7 @@ public final class SystemSessionProperties
     public static final String UTILIZE_UNIQUE_PROPERTY_IN_QUERY_PLANNING = "utilize_unique_property_in_query_planning";
     public static final String PUSHDOWN_SUBFIELDS_FOR_MAP_FUNCTIONS = "pushdown_subfields_for_map_functions";
     public static final String MAX_SERIALIZABLE_OBJECT_SIZE = "max_serializable_object_size";
+    public static final String EXPRESSION_OPTIMIZER_IN_ROW_EXPRESSION_REWRITE = "expression_optimizer_in_row_expression_rewrite";
 
     // TODO: Native execution related session properties that are temporarily put here. They will be relocated in the future.
     public static final String NATIVE_AGGREGATION_SPILL_ALL = "native_aggregation_spill_all";
@@ -364,7 +370,6 @@ public final class SystemSessionProperties
     public static final String NATIVE_MIN_COLUMNAR_ENCODING_CHANNELS_TO_PREFER_ROW_WISE_ENCODING = "native_min_columnar_encoding_channels_to_prefer_row_wise_encoding";
     public static final String NATIVE_ENFORCE_JOIN_BUILD_INPUT_PARTITION = "native_enforce_join_build_input_partition";
     public static final String NATIVE_EXECUTION_SCALE_WRITER_THREADS_ENABLED = "native_execution_scale_writer_threads_enabled";
-    public static final String NATIVE_EXECUTION_TYPE_REWRITE_ENABLED = "native_execution_type_rewrite_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -1145,6 +1150,11 @@ public final class SystemSessionProperties
                         "Only List built-in functions in SHOW FUNCTIONS",
                         featuresConfig.isListBuiltInFunctionsOnly(),
                         false),
+                stringProperty(
+                        NON_BUILT_IN_FUNCTION_NAMESPACES_TO_LIST_FUNCTIONS,
+                        "Comma-separated list of function namespace names from which to list non-built-in functions. Only takes effect when LIST_BUILT_IN_FUNCTIONS_ONLY is false. If empty, functions from all available function namespaces will be listed.",
+                        "",
+                        false),
                 new PropertyMetadata<>(
                         PARTITIONING_PRECISION_STRATEGY,
                         format("The strategy to use to pick when to repartition. Options are %s",
@@ -1387,6 +1397,18 @@ public final class SystemSessionProperties
                         "Allow full refresh of MV when it's empty - potentially high cost.",
                         featuresConfig.isMaterializedViewAllowFullRefreshEnabled(),
                         true),
+                new PropertyMetadata<>(
+                        MATERIALIZED_VIEW_STALE_READ_BEHAVIOR,
+                        format("Default behavior when reading from a stale materialized view. Valid values: %s",
+                                Stream.of(MaterializedViewStaleReadBehavior.values())
+                                        .map(MaterializedViewStaleReadBehavior::name)
+                                        .collect(joining(","))),
+                        VARCHAR,
+                        MaterializedViewStaleReadBehavior.class,
+                        featuresConfig.getMaterializedViewStaleReadBehavior(),
+                        false,
+                        value -> MaterializedViewStaleReadBehavior.valueOf(((String) value).toUpperCase()),
+                        MaterializedViewStaleReadBehavior::name),
                 stringProperty(
                         DISTRIBUTED_TRACING_MODE,
                         "Mode for distributed tracing. NO_TRACE, ALWAYS_TRACE, or SAMPLE_BASED",
@@ -1633,6 +1655,11 @@ public final class SystemSessionProperties
                         OPTIMIZE_MULTIPLE_APPROX_PERCENTILE_ON_SAME_FIELD,
                         "Combine individual approx_percentile calls on individual field to evaluation on an array",
                         featuresConfig.isOptimizeMultipleApproxPercentileOnSameFieldEnabled(),
+                        false),
+                booleanProperty(
+                        OPTIMIZE_MULTIPLE_APPROX_DISTINCT_ON_SAME_TYPE,
+                        "Combine individual approx_distinct calls on expressions of the same type using set_agg",
+                        featuresConfig.isOptimizeMultipleApproxDistinctOnSameTypeEnabled(),
                         false),
                 booleanProperty(
                         NATIVE_AGGREGATION_SPILL_ALL,
@@ -1995,14 +2022,15 @@ public final class SystemSessionProperties
                         "Enable automatic scaling of writer threads",
                         featuresConfig.isNativeExecutionScaleWritersThreadsEnabled(),
                         !featuresConfig.isNativeExecutionEnabled()),
-                booleanProperty(NATIVE_EXECUTION_TYPE_REWRITE_ENABLED,
-                        "Enable type rewrite for native execution",
-                        featuresConfig.isNativeExecutionTypeRewriteEnabled(),
-                        !featuresConfig.isNativeExecutionEnabled()),
                 stringProperty(
                         EXPRESSION_OPTIMIZER_NAME,
                         "Configure which expression optimizer to use",
                         featuresConfig.getExpressionOptimizerName(),
+                        false),
+                stringProperty(
+                        EXPRESSION_OPTIMIZER_IN_ROW_EXPRESSION_REWRITE,
+                        "Expression optimizer used in row expression rewrite, empty means no rewrite",
+                        featuresConfig.getExpressionOptimizerUsedInRowExpressionRewrite(),
                         false),
                 booleanProperty(BROADCAST_SEMI_JOIN_FOR_DELETE,
                         "Enforce broadcast join for semi join in delete",
@@ -2370,7 +2398,11 @@ public final class SystemSessionProperties
             return OptionalInt.empty();
         }
         else {
-            checkArgument(result > 0, "Concurrent lifespans per node must be positive if set to non-zero");
+            if (result < 0) {
+                throw new PrestoException(
+                        INVALID_SESSION_PROPERTY,
+                        format("Concurrent lifespans per node must be positive if set to non-zero. Found: %s", result));
+            }
             return OptionalInt.of(result);
         }
     }
@@ -2383,7 +2415,11 @@ public final class SystemSessionProperties
     public static int getQueryPriority(Session session)
     {
         Integer priority = session.getSystemProperty(QUERY_PRIORITY, Integer.class);
-        checkArgument(priority > 0, "Query priority must be positive");
+        if (priority <= 0) {
+            throw new PrestoException(
+                    INVALID_SESSION_PROPERTY,
+                    format("Query priority must be greater than zero. Found: %s", priority));
+        }
         return priority;
     }
 
@@ -2766,6 +2802,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(LIST_BUILT_IN_FUNCTIONS_ONLY, Boolean.class);
     }
 
+    public static Set<String> getNonBuiltInFunctionNamespacesToListFunctions(Session session)
+    {
+        return Splitter.on(",").trimResults().splitToList(session.getSystemProperty(NON_BUILT_IN_FUNCTION_NAMESPACES_TO_LIST_FUNCTIONS, String.class)).stream().filter(x -> !x.isEmpty()).collect(toImmutableSet());
+    }
+
     public static boolean isExactPartitioningPreferred(Session session)
     {
         return session.getSystemProperty(PARTITIONING_PRECISION_STRATEGY, PartitioningPrecisionStrategy.class)
@@ -2945,6 +2986,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(MATERIALIZED_VIEW_ALLOW_FULL_REFRESH_ENABLED, Boolean.class);
     }
 
+    public static MaterializedViewStaleReadBehavior getMaterializedViewStaleReadBehavior(Session session)
+    {
+        return session.getSystemProperty(MATERIALIZED_VIEW_STALE_READ_BEHAVIOR, MaterializedViewStaleReadBehavior.class);
+    }
+
     public static boolean isVerboseRuntimeStatsEnabled(Session session)
     {
         return session.getSystemProperty(VERBOSE_RUNTIME_STATS_ENABLED, Boolean.class);
@@ -3008,6 +3054,11 @@ public final class SystemSessionProperties
     public static boolean isCombineApproxPercentileEnabled(Session session)
     {
         return session.getSystemProperty(OPTIMIZE_MULTIPLE_APPROX_PERCENTILE_ON_SAME_FIELD, Boolean.class);
+    }
+
+    public static boolean isCombineApproxDistinctEnabled(Session session)
+    {
+        return session.getSystemProperty(OPTIMIZE_MULTIPLE_APPROX_DISTINCT_ON_SAME_TYPE, Boolean.class);
     }
 
     public static AggregationIfToFilterRewriteStrategy getAggregationIfToFilterRewriteStrategy(Session session)
@@ -3418,14 +3469,14 @@ public final class SystemSessionProperties
         return session.getSystemProperty(NATIVE_MAX_SPLIT_PRELOAD_PER_DRIVER, Integer.class);
     }
 
-    public static boolean isNativeExecutionTypeRewriteEnabled(Session session)
-    {
-        return session.getSystemProperty(NATIVE_EXECUTION_TYPE_REWRITE_ENABLED, Boolean.class);
-    }
-
     public static String getExpressionOptimizerName(Session session)
     {
         return session.getSystemProperty(EXPRESSION_OPTIMIZER_NAME, String.class);
+    }
+
+    public static String getExpressionOptimizerInRowExpressionRewrite(Session session)
+    {
+        return session.getSystemProperty(EXPRESSION_OPTIMIZER_IN_ROW_EXPRESSION_REWRITE, String.class);
     }
 
     public static boolean isBroadcastSemiJoinForDeleteEnabled(Session session)

@@ -39,6 +39,16 @@ void sendOkResponse(
       .sendWithEOM();
 }
 
+void sendOkTextResponse(
+    proxygen::ResponseHandler* downstream,
+    const std::string& body) {
+  proxygen::ResponseBuilder(downstream)
+      .status(http::kHttpOk, "")
+      .header(proxygen::HTTP_HEADER_CONTENT_TYPE, http::kMimeTypeTextPlain)
+      .body(body)
+      .sendWithEOM();
+}
+
 void sendOkThriftResponse(
     proxygen::ResponseHandler* downstream,
     const std::string& body) {
@@ -70,7 +80,7 @@ void sendResponse(
   std::string messageBody;
   try {
     messageBody = body.dump();
-  } catch (const std::exception& e) {
+  } catch (const std::exception&) {
     messageBody =
         body.dump(-1, ' ', false, nlohmann::detail::error_handler_t::replace);
     LOG(WARNING) << "Failed to serialize json to string. "

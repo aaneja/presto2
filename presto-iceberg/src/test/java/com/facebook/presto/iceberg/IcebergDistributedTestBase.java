@@ -115,8 +115,11 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -145,9 +148,11 @@ import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.RealType.REAL;
 import static com.facebook.presto.common.type.TimeZoneKey.UTC_KEY;
+import static com.facebook.presto.common.type.TimestampWithTimeZoneType.TIMESTAMP_WITH_TIME_ZONE;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.hive.BaseHiveColumnHandle.ColumnType.SYNTHESIZED;
 import static com.facebook.presto.hive.HiveCommonSessionProperties.PARQUET_BATCH_READ_OPTIMIZATION_ENABLED;
+import static com.facebook.presto.iceberg.CatalogType.HADOOP;
 import static com.facebook.presto.iceberg.FileContent.EQUALITY_DELETES;
 import static com.facebook.presto.iceberg.FileContent.POSITION_DELETES;
 import static com.facebook.presto.iceberg.FileFormat.ORC;
@@ -168,7 +173,9 @@ import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.node;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.output;
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.tableScan;
 import static com.facebook.presto.testing.MaterializedResult.resultBuilder;
+import static com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilegeType.INSERT_TABLE;
 import static com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilegeType.SELECT_COLUMN;
+import static com.facebook.presto.testing.TestingAccessControlManager.TestingPrivilegeType.UPDATE_TABLE;
 import static com.facebook.presto.testing.TestingAccessControlManager.privilege;
 import static com.facebook.presto.testing.TestingConnectorSession.SESSION;
 import static com.facebook.presto.testing.assertions.Assert.assertEquals;
@@ -177,6 +184,7 @@ import static com.facebook.presto.type.DecimalParametricType.DECIMAL;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.lang.String.format;
 import static java.nio.file.Files.createTempDirectory;
+import static java.util.Locale.ENGLISH;
 import static java.util.Locale.ROOT;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
@@ -186,6 +194,7 @@ import static org.apache.iceberg.SnapshotSummary.TOTAL_DELETE_FILES_PROP;
 import static org.apache.iceberg.types.Type.TypeID.TIME;
 import static org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_1_0;
 import static org.apache.parquet.column.ParquetProperties.WriterVersion.PARQUET_2_0;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNotEquals;
 import static org.testng.Assert.assertNotNull;
@@ -2043,6 +2052,116 @@ public abstract class IcebergDistributedTestBase
         }
     }
 
+    public void testMetadataDeleteOnV2MorTableWithRewriteDataFiles()
+    {
+        String tableName = "test_rewrite_data_files_table_" + randomTableSuffix();
+        try {
+            // Create a table with partition column `a`, and insert some data under this partition spec
+            assertUpdate("CREATE TABLE " + tableName + " (a INTEGER, b VARCHAR) WITH (format_version = '2', delete_mode = 'merge-on-read')");
+            assertUpdate("INSERT INTO " + tableName + " VALUES (1, '1001'), (2, '1002')", 2);
+            assertUpdate("DELETE FROM " + tableName + " WHERE a = 1", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, '1002')");
+
+            Table icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 1);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 1);
+
+            // Evaluate the partition spec by adding a partition column `c`, and insert some data under the new partition spec
+            assertUpdate("ALTER TABLE " + tableName + " ADD COLUMN c INTEGER WITH (partitioning = 'identity')");
+            assertUpdate("INSERT INTO " + tableName + " VALUES (3, '1003', 3), (4, '1004', 4), (5, '1005', 5)", 3);
+
+            icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 4);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 1);
+
+            // Execute row level delete with filter on column `b`
+            assertUpdate("DELETE FROM " + tableName + " WHERE b = '1004'", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, '1002', NULL), (3, '1003', 3), (5, '1005', 5)");
+            icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 4);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 2);
+
+            assertQueryFails("call system.rewrite_data_files(table_name => '" + tableName + "', schema => 'tpch', filter => 'a > 3')", ".*");
+            assertQueryFails("call system.rewrite_data_files(table_name => '" + tableName + "', schema => 'tpch', filter => 'c > 3')", ".*");
+
+            assertUpdate("call system.rewrite_data_files(table_name => '" + tableName + "', schema => 'tpch')", 3);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, '1002', NULL), (3, '1003', 3), (5, '1005', 5)");
+            icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 3);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 0);
+
+            // Do metadata delete on column `a`, because all partition specs contains partition column `a`
+            assertUpdate("DELETE FROM " + tableName + " WHERE c = 5", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, '1002', NULL), (3, '1003', 3)");
+            icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 2);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 0);
+
+            assertUpdate("call system.rewrite_data_files(table_name => '" + tableName + "', schema => 'tpch', filter => 'c > 2')", 1);
+            assertQuery("SELECT * FROM " + tableName, "VALUES (2, '1002', NULL), (3, '1003', 3)");
+            icebergTable = loadTable(tableName);
+            assertHasDataFiles(icebergTable.currentSnapshot(), 2);
+            assertHasDeleteFiles(icebergTable.currentSnapshot(), 0);
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS " + tableName);
+        }
+    }
+
+    @Test
+    public void testDropBranch()
+    {
+        assertUpdate("CREATE TABLE test_table_branch (id1 BIGINT, id2 BIGINT)");
+        assertUpdate("INSERT INTO test_table_branch VALUES (0, 00), (1, 10)", 2);
+
+        Table icebergTable = loadTable("test_table_branch");
+        icebergTable.manageSnapshots().createBranch("testBranch1").commit();
+
+        assertUpdate("INSERT INTO test_table_branch VALUES (2, 30), (3, 30)", 2);
+        icebergTable.manageSnapshots().createBranch("testBranch2").commit();
+        assertUpdate("INSERT INTO test_table_branch VALUES (4, 40), (5, 50)", 2);
+        assertEquals(icebergTable.refs().size(), 3);
+
+        assertQuery("SELECT count(*) FROM test_table_branch FOR SYSTEM_VERSION AS OF 'testBranch1'", "VALUES 2");
+        assertQuery("SELECT count(*) FROM test_table_branch FOR SYSTEM_VERSION AS OF 'testBranch2'", "VALUES 4");
+        assertQuery("SELECT count(*) FROM test_table_branch FOR SYSTEM_VERSION AS OF 'main'", "VALUES 6");
+
+        assertQuerySucceeds("ALTER TABLE test_table_branch DROP BRANCH 'testBranch1'");
+        icebergTable = loadTable("test_table_branch");
+        assertEquals(icebergTable.refs().size(), 2);
+        assertQueryFails("ALTER TABLE test_table_branch DROP BRANCH 'testBranchNotExist'", "Branch testBranchNotExist doesn't exist in table test_table_branch");
+        assertQuerySucceeds("ALTER TABLE test_table_branch DROP BRANCH IF EXISTS 'testBranch2'");
+        assertQuerySucceeds("ALTER TABLE test_table_branch DROP BRANCH IF EXISTS 'testBranchNotExist'");
+        assertQuerySucceeds("DROP TABLE test_table_branch");
+    }
+
+    @Test
+    public void testDropTag()
+    {
+        assertUpdate("CREATE TABLE test_table_tag (id1 BIGINT, id2 BIGINT)");
+        assertUpdate("INSERT INTO test_table_tag VALUES (0, 00), (1, 10)", 2);
+
+        Table icebergTable = loadTable("test_table_tag");
+        icebergTable.manageSnapshots().createTag("testTag1", icebergTable.currentSnapshot().snapshotId()).commit();
+
+        assertUpdate("INSERT INTO test_table_tag VALUES (2, 30), (3, 30)", 2);
+        icebergTable.manageSnapshots().createTag("testTag2", icebergTable.currentSnapshot().snapshotId()).commit();
+        assertUpdate("INSERT INTO test_table_tag VALUES (4, 40), (5, 50)", 2);
+        assertEquals(icebergTable.refs().size(), 3);
+
+        assertQuery("SELECT count(*) FROM test_table_tag FOR SYSTEM_VERSION AS OF 'testTag1'", "VALUES 2");
+        assertQuery("SELECT count(*) FROM test_table_tag FOR SYSTEM_VERSION AS OF 'testTag2'", "VALUES 4");
+        assertQuery("SELECT count(*) FROM test_table_tag FOR SYSTEM_VERSION AS OF 'main'", "VALUES 6");
+
+        assertQuerySucceeds("ALTER TABLE test_table_tag DROP TAG 'testTag1'");
+        icebergTable = loadTable("test_table_tag");
+        assertEquals(icebergTable.refs().size(), 2);
+        assertQueryFails("ALTER TABLE test_table_tag DROP TAG 'testTagNotExist'", "Tag testTagNotExist doesn't exist in table test_table_tag");
+        assertQuerySucceeds("ALTER TABLE test_table_tag DROP TAG IF EXISTS 'testTag2'");
+        assertQuerySucceeds("ALTER TABLE test_table_tag DROP TAG IF EXISTS 'testTagNotExist'");
+        assertQuerySucceeds("DROP TABLE test_table_tag");
+    }
+
     @Test
     public void testRefsTable()
     {
@@ -2093,6 +2212,75 @@ public abstract class IcebergDistributedTestBase
         // Currently Presto returns current table schema for any previous snapshot access https://github.com/prestodb/presto/issues/23553
         // otherwise querying a tag uses the snapshot's schema https://iceberg.apache.org/docs/nightly/branching/#schema-selection-with-branches-and-tags
         assertQuery("SELECT * FROM test_table_references FOR SYSTEM_VERSION AS OF 'testTag' where id1=1", "VALUES(1, NULL)");
+    }
+
+    @Test
+    public void testMetadataLogTable()
+    {
+        try {
+            assertUpdate("CREATE TABLE test_table_metadatalog (id1 BIGINT, id2 BIGINT)");
+            assertQuery("SELECT count(*) FROM \"test_table_metadatalog$metadata_log_entries\"", "VALUES 1");
+            //metadata file created at table creation
+            assertQuery("SELECT latest_snapshot_id FROM \"test_table_metadatalog$metadata_log_entries\"", "VALUES NULL");
+
+            assertUpdate("INSERT INTO test_table_metadatalog VALUES (0, 00), (1, 10), (2, 20)", 3);
+            Table icebergTable = loadTable("test_table_metadatalog");
+            Snapshot latestSnapshot = icebergTable.currentSnapshot();
+            assertQuery("SELECT count(*) FROM \"test_table_metadatalog$metadata_log_entries\"", "VALUES 2");
+            assertQuery("SELECT latest_snapshot_id FROM \"test_table_metadatalog$metadata_log_entries\" order by timestamp DESC limit 1", "values " + latestSnapshot.snapshotId());
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS test_table_metadatalog");
+        }
+    }
+
+    @DataProvider(name = "timezoneId")
+    public Object[][] getTimezonesId()
+    {
+        return new Object[][]{{"UTC"}, {"America/Los_Angeles"}, {"Asia/Shanghai"}, {"Asia/Kolkata"}, {"America/Bahia_Banderas"}, {"Europe/Brussels"}};
+    }
+
+    @Test(dataProvider = "timezoneId")
+    public void testMetadataLogTableWithTimeZoneId(String zoneId)
+    {
+        try {
+            Session sessionForTimeZone = Session.builder(getSession())
+                        .setTimeZoneKey(TimeZoneKey.getTimeZoneKey(zoneId)).build();
+
+            assertUpdate(sessionForTimeZone, "CREATE TABLE test_table_metadatalog_tz_id (id1 BIGINT, id2 BIGINT)");
+            assertQuery(sessionForTimeZone, "SELECT count(*) FROM \"test_table_metadatalog_tz_id$metadata_log_entries\"", "VALUES 1");
+            assertQuery(sessionForTimeZone, "SELECT latest_snapshot_id FROM \"test_table_metadatalog_tz_id$metadata_log_entries\"", "VALUES NULL");
+            Table icebergTable = loadTable("test_table_metadatalog_tz_id");
+            TableMetadata tableMetadata = ((BaseTable) icebergTable).operations().current();
+            ZonedDateTime zonedDateTime1 = Instant.ofEpochMilli(tableMetadata.lastUpdatedMillis())
+                    .atZone(ZoneId.of(zoneId));
+            //metadata file created at table creation
+            String metadataFileLocation1 = tableMetadata.metadataFileLocation();
+
+            assertUpdate("INSERT INTO test_table_metadatalog_tz_id VALUES (0, 00), (1, 10), (2, 20)", 3);
+            icebergTable = loadTable("test_table_metadatalog_tz_id");
+            tableMetadata = ((BaseTable) icebergTable).operations().current();
+            ZonedDateTime zonedDateTime2 = Instant.ofEpochMilli(tableMetadata.lastUpdatedMillis())
+                    .atZone(ZoneId.of(zoneId));
+            //metadata file created after table insertion
+            String metadataFileLocation2 = tableMetadata.metadataFileLocation();
+
+            Snapshot latestSnapshot = icebergTable.currentSnapshot();
+            assertQuery("SELECT count(*) FROM \"test_table_metadatalog_tz_id$metadata_log_entries\"", "VALUES 2");
+            assertQuery("SELECT latest_snapshot_id FROM \"test_table_metadatalog_tz_id$metadata_log_entries\" order by timestamp DESC limit 1", "values " + latestSnapshot.snapshotId());
+
+            MaterializedResult actual = getQueryRunner().execute(sessionForTimeZone, "SELECT * FROM \"test_table_metadatalog_tz_id$metadata_log_entries\"");
+            assertThat(actual).hasSize(2);
+            MaterializedResult expected = resultBuilder(getSession(), TIMESTAMP_WITH_TIME_ZONE, VARCHAR, BIGINT, INTEGER, BIGINT)
+                    .row(zonedDateTime1, metadataFileLocation1, null, null, null)
+                    .row(zonedDateTime2, metadataFileLocation2, latestSnapshot.snapshotId(), latestSnapshot.schemaId(), latestSnapshot.sequenceNumber())
+                    .build();
+
+            assertEquals(actual, expected);
+        }
+        finally {
+            assertUpdate("DROP TABLE IF EXISTS test_table_metadatalog_tz_id");
+        }
     }
 
     @Test
@@ -2744,6 +2932,1012 @@ public abstract class IcebergDistributedTestBase
         assertQuery("SELECT a, b FROM " + tableName, "VALUES (3,'first'), (4,'4th'), (3,'third')");
     }
 
+    @DataProvider
+    public Object[][] partitionedProvider()
+    {
+        return new Object[][] {
+                {""}, // Without partitions.
+                {"WITH (partitioning = ARRAY['address'])"}
+        };
+    }
+
+    @Test(dataProvider = "partitionedProvider")
+    public void testMergeSimpleQuery(String partitioning)
+    {
+        String targetTable = "merge_query_" + randomTableSuffix();
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) %s", targetTable, partitioning));
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(VALUES ('Aaron', 6, 'Arches'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire'), ('Ed', 7, 'Etherville')) AS s(customer, purchases, address) " +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeSimpleQueryPartitioned()
+    {
+        String targetTable = "merge_simple_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) WITH (partitioning = ARRAY['customer'])", targetTable));
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(SELECT * FROM (VALUES ('Aaron', 6, 'Arches'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire'), ('Ed', 7, 'Etherville'))) AS s(customer, purchases, address) " +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeWithoutTablesAliases()
+    {
+        String targetTable = "test_without_aliases_target_" + randomTableSuffix();
+        String sourceTable = "test_without_aliases_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 6, 'Arches'), ('Ed', 7, 'Etherville'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire')", sourceTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s USING %s ", targetTable, sourceTable) +
+                            format("ON (%s.customer = %s.customer) ", targetTable, sourceTable) +
+                            format("WHEN MATCHED THEN" +
+                                    "    UPDATE SET purchases = %s.purchases + %s.purchases, address = %s.address ", sourceTable, targetTable, sourceTable) +
+                            format("WHEN NOT MATCHED THEN" +
+                                    "    INSERT (customer, purchases, address) VALUES(%s.customer, %s.purchases, %s.address)", sourceTable, sourceTable, sourceTable);
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeUsingUpdateAndInsert()
+    {
+        String targetTable = "merge_simple_target_" + randomTableSuffix();
+        String sourceTable = "merge_simple_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 6, 'Arches'), ('Ed', 7, 'Etherville'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire')", sourceTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Ed', 7, 'Etherville'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @DataProvider
+    public Object[][] mergeIncludeWhenAndWhenNotMatchedProvider()
+    {
+        return new Object[][] {
+                {true},
+                {false},
+        };
+    }
+
+    @Test(dataProvider = "mergeIncludeWhenAndWhenNotMatchedProvider")
+    public void testMergeOnlyInsertNewRows(boolean includeWhenMatched)
+    {
+        // This test verifies that the MERGE command works correctly when no rows in the source table meet the MERGE condition.
+        // It means that the MERGE command will behave as an INSERT command.
+        String targetTable = "merge_inserts_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 11, 'Antioch'), ('Bill', 7, 'Buena')", targetTable), 2);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(VALUES ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire')) AS s(customer, purchases, address)" +
+                            "ON (t.customer = s.customer)" +
+                            (includeWhenMatched ?
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET customer = CONCAT(t.customer, '_updated'), purchases = s.purchases + t.purchases, address = s.address " : "") +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 2);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test(dataProvider = "mergeIncludeWhenAndWhenNotMatchedProvider")
+    public void testMergeOnlyUpdateExistingRows(boolean includeWhenNotMatched)
+    {
+        // This test verifies that the MERGE command works correctly when all rows in the source table meet the MERGE condition.
+        // It means that the MERGE command will behave as an UPDATE command.
+        String targetTable = "merge_all_columns_updated_target_" + randomTableSuffix();
+        String sourceTable = "merge_all_columns_updated_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Dave', 11, 'Devon'), ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge')", targetTable), 4);
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Dave', 11, 'Darbyshire'), ('Aaron', 6, 'Arches'), ('Carol', 9, 'Centreville')", sourceTable), 3);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET customer = CONCAT(t.customer, '_updated'), purchases = s.purchases + t.purchases, address = s.address " +
+                            (includeWhenNotMatched ?
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)" : "");
+
+            assertUpdate(sqlMergeCommand, 3);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Dave_updated', 22, 'Darbyshire'), ('Aaron_updated', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol_updated', 12, 'Centreville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeEmptyTargetTable()
+    {
+        String targetTable = "merge_inserts_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(VALUES ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire')) AS s(customer, purchases, address)" +
+                            "ON (t.customer = s.customer)" +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET customer = CONCAT(t.customer, '_updated'), purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 2);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Carol', 9, 'Centreville'), ('Dave', 22, 'Darbyshire')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeEmptySourceTable()
+    {
+        String targetTable = "merge_all_columns_updated_target_" + randomTableSuffix();
+        String sourceTable = "merge_all_columns_updated_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Dave', 11, 'Devon'), ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge')", targetTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET customer = CONCAT(t.customer, '_updated'), purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 0);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Dave', 11, 'Devon'), ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @DataProvider
+    public Object[][] partitionedAndBucketedProvider()
+    {
+        return new Object[][] {
+                {""}, // Without partitions.
+                {"WITH (partitioning = ARRAY['customer'])"},
+                {"WITH (partitioning = ARRAY['purchases'])"},
+                {"WITH (partitioning = ARRAY['bucket(customer, 3)'])"},
+                {"WITH (partitioning = ARRAY['bucket(purchases, 4)'])"},
+        };
+    }
+
+    @Test(dataProvider = "partitionedAndBucketedProvider")
+    public void testMergeUsingSelectQuery(String partitioning)
+    {
+        String targetTable = "merge_various_target_" + randomTableSuffix();
+        String sourceTable = "merge_various_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases VARCHAR) %s", targetTable, partitioning));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases) VALUES ('Dave', 'dates'), ('Lou', 'limes'), ('Carol', 'candles')", targetTable), 3);
+            assertUpdate(format("INSERT INTO %s (customer, purchases) VALUES ('Craig', 'candles'), ('Len', 'limes'), ('Joe', 'jellybeans')", sourceTable), 3);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING (SELECT customer, purchases FROM %s) s ", targetTable, sourceTable) +
+                            "ON (t.purchases = s.purchases) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET customer = CONCAT(t.customer, '_', s.customer) " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases) VALUES(s.customer, s.purchases)";
+
+            assertUpdate(sqlMergeCommand, 3);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Dave', 'dates'), ('Carol_Craig', 'candles'), ('Lou_Len', 'limes'), ('Joe', 'jellybeans')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test(dataProvider = "partitionedAndBucketedProvider")
+    public void testMultipleMergeCommands(String partitioning)
+    {
+        int targetCustomerCount = 32;
+        String targetTable = "merge_multiple_" + randomTableSuffix();
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, zipcode INT, spouse VARCHAR, address VARCHAR) %s", targetTable, partitioning));
+
+            // joe_1, 1000, 91000, jan_1, 1 Poe Ct
+            // ...
+            // joe_15, 1000, 91000, jan_15, 15 Poe Ct
+            String originalInsertFirstHalf = IntStream.range(1, targetCustomerCount / 2)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jan_%s', '%s Poe Ct')", intValue, 1000, 91000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            // joe_16, 2000, 92000, jan_16, 16 Poe Ct
+            // ...
+            // joe_32, 2000, 92000, jan_32, 32 Poe Ct
+            String originalInsertSecondHalf = IntStream.range(targetCustomerCount / 2, targetCustomerCount)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jan_%s', '%s Poe Ct')", intValue, 2000, 92000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, zipcode, spouse, address) " +
+                    "VALUES %s, %s", targetTable, originalInsertFirstHalf, originalInsertSecondHalf), targetCustomerCount - 1);
+
+            // joe_16, 3000, 83000, jan_16, 16 Eop Ct
+            // ...
+            // joe_32, 3000, 83000, jan_32, 32 Eop Ct
+            String firstMergeSource = IntStream.range(targetCustomerCount / 2, targetCustomerCount)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jill_%s', '%s Eop Ct')", intValue, 3000, 83000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING (VALUES %s) AS s(customer, purchases, zipcode, spouse, address)", targetTable, firstMergeSource) +
+                            "ON t.customer = s.customer " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases, zipcode = s.zipcode, spouse = s.spouse, address = s.address";
+
+            assertUpdate(sqlMergeCommand, targetCustomerCount / 2);
+
+            assertQuery(
+                    format("SELECT customer, purchases, zipcode, spouse, address FROM %s", targetTable),
+                    format("VALUES %s, %s", originalInsertFirstHalf, firstMergeSource));
+
+            // jack_32, 4000, 74000, jan_32, 32 Poe Ct
+            // ...
+            // jack_48, 4000, 74000, jan_48, 48 Poe Ct
+            String nextInsert = IntStream.range(targetCustomerCount, targetCustomerCount * 3 / 2)
+                    .mapToObj(intValue -> format("('jack_%s', %s, %s, 'jan_%s', '%s Poe Ct')", intValue, 4000, 74000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, zipcode, spouse, address) VALUES %s", targetTable, nextInsert), targetCustomerCount / 2);
+
+            // joe_1, 5000, 85000, jen_32, 32 Poe Ct
+            // ...
+            // joe_48, 5000, 85000, jen_48, 48 Poe Ct
+            String secondMergeSource = IntStream.range(1, targetCustomerCount * 3 / 2)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jen_%s', '%s Poe Ct')", intValue, 5000, 85000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            // Note that the following MERGE INTO does not update the "purchases" column.
+            sqlMergeCommand =
+                    format("MERGE INTO %s t USING (VALUES %s) AS s(customer, purchases, zipcode, spouse, address)", targetTable, secondMergeSource) +
+                            "ON t.customer = s.customer " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET zipcode = s.zipcode, spouse = s.spouse, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, zipcode, spouse, address) VALUES(s.customer, s.purchases, s.zipcode, s.spouse, s.address)";
+
+            assertUpdate(sqlMergeCommand, targetCustomerCount * 3 / 2 - 1);
+
+            // joe_1, 1000, 85000, jen_1, 1 Poe Ct
+            // ...
+            // joe_15, 1000, 85000, jen_15, 15 Poe Ct
+            String updatedFirstHalf = IntStream.range(1, targetCustomerCount / 2)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jen_%s', '%s Poe Ct')", intValue, 1000, 85000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            // joe_16, 3000, 85000, jen_16, 16 Poe Ct
+            // ...
+            // joe_32, 3000, 85000, jen_32, 32 Poe Ct
+            String updatedSecondHalf = IntStream.range(targetCustomerCount / 2, targetCustomerCount)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jen_%s', '%s Poe Ct')", intValue, 3000, 85000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            // jack_32, 4000, 74000, jan_32, 32 Poe Ct
+            // ...
+            // jack_48, 4000, 74000, jan_48, 48 Poe Ct
+            String nonUpdatedRows = nextInsert;
+
+            // joe_32, 5000, 85000, jen_32, 32 Poe Ct
+            // ...
+            // joe_48, 5000, 85000, jen_48, 48 Poe Ct
+            String insertedRows = IntStream.range(targetCustomerCount, targetCustomerCount * 3 / 2)
+                    .mapToObj(intValue -> format("('joe_%s', %s, %s, 'jen_%s', '%s Poe Ct')", intValue, 5000, 85000, intValue, intValue))
+                    .collect(Collectors.joining(", "));
+
+            assertQuery(
+                    format("SELECT customer, purchases, zipcode, spouse, address FROM %s", targetTable),
+                    format("VALUES %s, %s, %s, %s", updatedFirstHalf, updatedSecondHalf, nonUpdatedRows, insertedRows));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeMillionRows()
+    {
+        String tableName = "test_merge_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (orderkey BIGINT, custkey BIGINT, totalprice DOUBLE)", tableName));
+
+            // Initialize the merge target table with data:
+            // When "mod(orderkey, 3) = 0" -> copy rows, when "mod(orderkey, 3) = 1" -> double price, when "mod(orderkey, 3) = 2" ->  rows with new orderkey
+            assertUpdate(
+                    format("INSERT INTO %s " +
+                                    "SELECT orderkey, custkey, totalprice FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 0 " + // rows copied
+                                    "UNION ALL " +
+                                    "SELECT orderkey, custkey, 2*totalprice as totalprice FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 1 " + // rows with updated price
+                                    "UNION ALL " +
+                                    "SELECT orderkey + 100000002 as orderkey, custkey, totalprice as totalprice FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 2", // rows with new orderkey
+                            tableName),
+                    (long) computeActual("SELECT count(*) FROM tpch.sf1.orders").getOnlyValue());
+
+            // verify copied rows: same total price
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 0",
+                    "SELECT count(*), round(sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 0");
+
+            // verify rows will be updated: double total price
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 1",
+                    "SELECT count(*), round(2*sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 1");
+
+            // verify rows will be inserted: same total price and different orderkey.
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 2",
+                    "SELECT count(*), round(sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 2");
+
+            // MERGE INTO command to update the price of the existing orders and insert new orders, multiplying the original price by 3.
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING (SELECT * FROM tpch.sf1.orders) s ", tableName) +
+                            "ON (t.orderkey = s.orderkey) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET totalprice = s.totalprice " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (orderkey, custkey, totalprice) VALUES (s.orderkey, s.custkey, 3*s.totalprice)";
+
+            assertUpdate(sqlMergeCommand, 1_500_000);
+
+            // verify unmodified rows: same total price
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 0",
+                    "SELECT count(*), round(sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 0");
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 2 AND orderkey > 100000002",
+                    "SELECT count(*), round(sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 2");
+
+            // verify updated rows: same total price (these rows originally had double total price in the target table)
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 1",
+                    "SELECT count(*), round(sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 1");
+
+            // verify inserted rows: triple original price
+            assertQueryWithSameQueryRunner(
+                    "SELECT count(*), round(sum(totalprice)) FROM " + tableName + " WHERE mod(orderkey, 3) = 2 AND orderkey < 100000002",
+                    "SELECT count(*), round(3*sum(totalprice)) FROM tpch.sf1.orders WHERE mod(orderkey, 3) = 2");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
+    }
+
+    @Test
+    public void testMergeQueryWithWeirdColumnsCapitalization()
+    {
+        String targetTable = "merge_weird_capitalization_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable.toUpperCase(ENGLISH)) +
+                            "(VALUES ('Aaron', 6, 'Arches'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire'), ('Ed', 7, 'Etherville')) AS s(customer, purchases, address) " +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purCHases = s.PurchaseS + t.pUrchases, aDDress = s.addrESs " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (CUSTOMER, purchases, addRESS) VALUES(s.custoMer, s.Purchases, s.ADDress)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeWithMultipleConditions()
+    {
+        String targetTable = "merge_predicates_target_" + randomTableSuffix();
+        String sourceTable = "merge_predicates_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (id INT, customer VARCHAR, purchases INT, address VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (id INT, customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (id, customer, purchases, address) VALUES (1, 'Dave', 10, 'Devon'), (2, 'Dave', 20, 'Darbyshire')", targetTable), 2);
+            assertUpdate(format("INSERT INTO %s (id, customer, purchases, address) VALUES (3, 'Dave', 2, 'Madrid'), (4, 'Dave', 15, 'Barcelona')", sourceTable), 2);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON t.customer = s.customer AND s.purchases < 6 " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases + t.purchases, address = concat(t.address, '/', s.address) " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (id, customer, purchases, address) VALUES (s.id, s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 3);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES (1, 'Dave', 12, 'Devon/Madrid'), (2, 'Dave', 22, 'Darbyshire/Madrid'), (4, 'Dave', 15, 'Barcelona')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeCasts()
+    {
+        String targetTable = "merge_cast_target_" + randomTableSuffix();
+        String sourceTable = "merge_cast_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (col1 INT, col2 BIGINT, col3 REAL, col4 DOUBLE, col5 DOUBLE)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (col1 INT, col2 INT, col3 INT, col4 INT, col5 REAL)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s VALUES (1, 2, 3, 4, 5)", targetTable), 1);
+            assertUpdate(format("INSERT INTO %s VALUES (2, 3, 4, 5, 6)", sourceTable), 1);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.col1 + 1 = s.col1) " + // Note that the merge condition contains a sum.
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET col1 = s.col1, col2 = s.col2, col3 = s.col3, col4 = s.col4, col5 = s.col5";
+
+            assertUpdate(sqlMergeCommand, 1);
+
+            assertQuery("SELECT * FROM " + targetTable, "VALUES (2, 3, 4.0, 5.0, 6.0)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeSubqueries()
+    {
+        String targetTable = "merge_nation_target_" + randomTableSuffix();
+        String sourceTable = "merge_nation_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (nation_name VARCHAR, region_name VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (nation_name VARCHAR, region_name VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (nation_name, region_name) VALUES ('GERMANY', 'EUROPE'), ('ALGERIA', 'AFRICA'), ('FRANCE', 'EUROPE')", targetTable), 3);
+            assertUpdate(format("INSERT INTO %s VALUES ('ALGERIA', 'AFRICA'), ('FRANCE', 'EUROPE'), ('EGYPT', 'MIDDLE EAST'), ('RUSSIA', 'EUROPE')", sourceTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.nation_name = s.nation_name) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = (SELECT CONCAT(name, '_UPDATED') FROM tpch.tiny.region WHERE name = t.region_name) " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT VALUES(s.nation_name, (SELECT CONCAT(name, '_INSERTED') FROM tpch.tiny.region WHERE name = s.region_name))";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('GERMANY', 'EUROPE'), " +
+                            "('ALGERIA', 'AFRICA_UPDATED'), ('FRANCE', 'EUROPE_UPDATED'), " +
+                            "('EGYPT', 'MIDDLE EAST_INSERTED'), ('RUSSIA', 'EUROPE_INSERTED')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @DataProvider
+    public Object[][] partitionedBucketedFailure()
+    {
+        return new Object[][] {
+                {"CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)"},
+                {"CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) WITH (partitioning = ARRAY['customer'])"},
+                {"CREATE TABLE %s (customer VARCHAR, address VARCHAR, purchases INT) WITH (partitioning = ARRAY['address'])"},
+                {"CREATE TABLE %s (purchases INT, customer VARCHAR, address VARCHAR) WITH (partitioning = ARRAY['customer', 'address'])"},
+                {"CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) WITH (partitioning = ARRAY['bucket(customer, 3)'])"}
+        };
+    }
+
+    @Test(dataProvider = "partitionedBucketedFailure")
+    public void testMergeMultipleRowsMatchMustFails(String createTableSql)
+    {
+        String targetTable = "merge_multiple_rows_match_target_" + randomTableSuffix();
+        String sourceTable = "merge_multiple_rows_match_source_" + randomTableSuffix();
+
+        try {
+            assertUpdate(format(createTableSql, targetTable));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR)", sourceTable));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Antioch')", targetTable), 2);
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 6, 'Adelphi'), ('Aaron', 8, 'Ashland')", sourceTable), 2);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET address = s.address";
+
+            assertQueryFails(sqlMergeCommand, ".*The MERGE INTO command requires each target row to match at most one source row.*");
+
+            assertUpdate(format("DELETE FROM %s WHERE purchases = 8", sourceTable), 1);
+
+            assertUpdate(sqlMergeCommand, 1);
+
+            assertQuery("SELECT customer, purchases, address FROM " + targetTable,
+                    "VALUES ('Aaron', 5, 'Adelphi'), ('Bill', 7, 'Antioch')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    private void createNationRegionTable(String targetTable)
+    {
+        assertUpdate(format("CREATE TABLE %s (nation_name VARCHAR, region_name VARCHAR NOT NULL)", targetTable));
+    }
+
+    @Test
+    public void testMergeNonNullableColumns()
+    {
+        String targetTable = "merge_non_nullable_target_" + randomTableSuffix();
+
+        try {
+            createNationRegionTable(targetTable);
+            assertUpdate(format("INSERT INTO %s (nation_name, region_name) VALUES ('FRANCE', 'EUROPE'), ('ALGERIA', 'AFRICA'), ('GERMANY', 'EUROPE')", targetTable), 3);
+
+            List<String> sqlMergeCommands = Arrays.asList(
+                    // Command to check that updating using a null value fails.
+                    format("MERGE INTO %s t ", targetTable) +
+                            "USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) " +
+                            "ON (t.nation_name = s.nation_name)\n" +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = NULL",
+
+                    // Command to check that inserting using a null value fails.
+                    format("MERGE INTO %s t ", targetTable) +
+                            " USING (VALUES ('ANGOLA', 'AFRICA')) s(nation_name, region_name) " +
+                            "ON (t.nation_name = s.nation_name) " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (nation_name, region_name) VALUES (s.nation_name, NULL)",
+
+                    // Command to check that inserting using an implicit null value fails.
+                    format("MERGE INTO %s t ", targetTable) +
+                            "USING (VALUES ('ANGOLA', 'AFRICA')) s(nation_name, region_name) " +
+                            "ON (t.nation_name = s.nation_name) " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (nation_name) VALUES ('CANADA')",
+
+                    // Command to check that if the updated value is provided by a function unpredictably computing null, the merge fails.
+                    format("MERGE INTO %s t ", targetTable) +
+                            "USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) " +
+                            "ON (t.nation_name = s.nation_name) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = CAST(TRY(5/0) AS VARCHAR)");
+
+            for (@Language("SQL") String sqlMergeCommand : sqlMergeCommands) {
+                assertQueryFails(sqlMergeCommand, "NULL value not allowed for NOT NULL column. Table: merge_non_nullable_target_.* Column: region_name");
+            }
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @DataProvider
+    public Object[][] targetAndSourceWithDifferentPartitioning()
+    {
+        return new Object[][] {
+                {
+                    "target_flat_source_flat",
+                    "",
+                    ""
+                },
+                {
+                    "target_partitioned_source_flat",
+                    "WITH (partitioning = ARRAY['customer'])",
+                    ""
+                },
+                {
+                    "target_bucketed_source_flat",
+                    "WITH (partitioning = ARRAY['bucket(customer, 3)'])",
+                    ""
+                },
+                {
+                    "target_partitioned_and_bucketed_source_flat",
+                    "WITH (partitioning = ARRAY['address', 'bucket(customer, 3)'])",
+                    ""
+                },
+                {
+                    "target_partitioned_and_bucketed_source_partitioned",
+                    "WITH (partitioning = ARRAY['address', 'bucket(customer, 3)'])",
+                    "WITH (partitioning = ARRAY['customer'])"
+                },
+                {
+                    "target_and_source_partitioned_and_bucketed",
+                    "WITH (partitioning = ARRAY['address', 'bucket(customer, 3)'])",
+                    "WITH (partitioning = ARRAY['address', 'bucket(customer, 3)'])"
+                }
+        };
+    }
+
+    @Test(dataProvider = "targetAndSourceWithDifferentPartitioning")
+    public void testMergeWithDifferentPartitioning(String testDescription, String targetTablePartitioning, String sourceTablePartitioning)
+    {
+        String targetTable = format("%s_target_%s", testDescription, randomTableSuffix());
+        String sourceTable = format("%s_source_%s", testDescription, randomTableSuffix());
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) %s", targetTable, targetTablePartitioning));
+            assertUpdate(format("CREATE TABLE %s (customer VARCHAR, purchases INT, address VARCHAR) %s", sourceTable, sourceTablePartitioning));
+
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 5, 'Antioch'), ('Bill', 7, 'Buena'), ('Carol', 3, 'Cambridge'), ('Dave', 11, 'Devon')", targetTable), 4);
+            assertUpdate(format("INSERT INTO %s (customer, purchases, address) VALUES ('Aaron', 6, 'Arches'), ('Ed', 7, 'Etherville'), ('Carol', 9, 'Centreville'), ('Dave', 11, 'Darbyshire')", sourceTable), 4);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                            "ON (t.customer = s.customer) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET purchases = s.purchases + t.purchases, address = s.address " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (customer, purchases, address) VALUES(s.customer, s.purchases, s.address)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES ('Aaron', 11, 'Arches'), ('Bill', 7, 'Buena'), ('Carol', 12, 'Centreville'), ('Dave', 22, 'Darbyshire'), ('Ed', 7, 'Etherville')");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeAccessControl()
+    {
+        String catalogName = getSession().getCatalog().get();
+        String schemaName = getSession().getSchema().get();
+
+        String targetTable = "merge_nation_target_" + randomTableSuffix();
+        String targetName = format("%s.%s.%s", catalogName, schemaName, targetTable);
+
+        String sourceTable = "merge_nation_source_" + randomTableSuffix();
+        String sourceName = format("%s.%s.%s", catalogName, schemaName, sourceTable);
+
+        try {
+            assertUpdate(format("CREATE TABLE %s (nation_name VARCHAR, region_name VARCHAR)", targetTable));
+            assertUpdate(format("CREATE TABLE %s (nation_name VARCHAR, region_name VARCHAR)", sourceTable));
+
+            String baseMergeSql = format("MERGE INTO %s t USING %s s ", targetTable, sourceTable) +
+                    "ON (t.nation_name = s.nation_name) ";
+            String updateCase =
+                    "WHEN MATCHED THEN" +
+                            "    UPDATE SET nation_name = concat(s.nation_name, '_foo')";
+            String insertCase =
+                    "WHEN NOT MATCHED THEN" +
+                            "    INSERT VALUES(s.nation_name, (SELECT 'EUROPE'))";
+
+            ImmutableList<String> mergeCases = ImmutableList.of(updateCase, insertCase);
+            for (String mergeCase : mergeCases) {
+                // Show that without SELECT privilege on the source table, the MERGE fails regardless of which case is included
+                assertAccessDenied(baseMergeSql + mergeCase, "Cannot select from columns .* in table or view " + sourceName, privilege(sourceTable, SELECT_COLUMN));
+
+                // Show that without SELECT privilege  on the target table, the MERGE fails regardless of which case is included
+                assertAccessDenied(baseMergeSql + mergeCase, "Cannot select from columns .* in table or view " + targetName, privilege(targetTable, SELECT_COLUMN));
+            }
+
+            // Show that without INSERT privilege on the target table, the MERGE fails
+            assertAccessDenied(baseMergeSql + insertCase, "Cannot insert into table " + targetName, privilege(targetTable, INSERT_TABLE));
+
+            // Show that without UPDATE privilege on the target table, the MERGE fails
+            assertAccessDenied(baseMergeSql + updateCase, "Cannot update columns \\[\\[nation_name\\]\\] in table " + targetName, privilege(targetTable, UPDATE_TABLE));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testInvalidMergePredicate()
+    {
+        String targetTable = "merge_invalid_predicate_" + randomTableSuffix();
+
+        try {
+            createNationRegionTable(targetTable);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) ", targetTable) +
+                            "ON (t.nation_name) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = s.region_name";
+
+            assertQueryFails(sqlMergeCommand, ".*The MERGE predicate must evaluate to a boolean: actual type varchar");
+
+            sqlMergeCommand =
+                    format("MERGE INTO %s t USING (VALUES (1, 'ALGERIA', 'AFRICA')) s(nation_id, nation_name, region_name) ", targetTable) +
+                            "ON (t.nation_name = s.nation_id) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = s.region_name";
+
+            assertQueryFails(sqlMergeCommand, ".*'=' cannot be applied to varchar, integer");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeUnknownColumnName()
+    {
+        String targetTable = "merge_unknown_column_" + randomTableSuffix();
+
+        try {
+            createNationRegionTable(targetTable);
+
+            String baseMergeSql = format("MERGE INTO %s t USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) ", targetTable) +
+                    "ON (t.nation_name = s.nation_name) ";
+
+            List<String> sqlMergeCommands = Arrays.asList(
+                    // Unknown column in the UPDATE statement.
+                    baseMergeSql +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET unknown_column = s.region_name",
+
+                    // Unknown column in the INSERT statement.
+                    baseMergeSql +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (nation_name, unknown_column) VALUES(s.nation_name, (SELECT 'EUROPE'))");
+
+            for (@Language("SQL") String sqlMergeCommand : sqlMergeCommands) {
+                assertQueryFails(sqlMergeCommand, ".*Merge column name does not exist in target table: unknown_column");
+            }
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeDuplicateColumnName()
+    {
+        String targetTable = "merge_duplicate_column_" + randomTableSuffix();
+
+        try {
+            createNationRegionTable(targetTable);
+
+            String baseMergeSql = format("MERGE INTO %s t USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) ", targetTable) +
+                    "ON (t.nation_name = s.nation_name) ";
+
+            List<String> sqlMergeCommands = Arrays.asList(
+                    // Duplicate column in the UPDATE statement.
+                    baseMergeSql +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = s.region_name, region_name = 'AFRICA'",
+
+                    // Duplicate column in the INSERT statement.
+                    baseMergeSql +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (nation_name, region_name, region_name) VALUES(s.nation_name, (SELECT 'EUROPE'), 'AFRICA')");
+
+            for (@Language("SQL") String sqlMergeCommand : sqlMergeCommands) {
+                assertQueryFails(sqlMergeCommand, ".*Merge column name is specified more than once: region_name");
+            }
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeMismatchedColumnDataTypes()
+    {
+        String targetTable = "merge_mismatched_column_data_types_" + randomTableSuffix();
+
+        try {
+            createNationRegionTable(targetTable);
+
+            String baseMergeSql = format("MERGE INTO %s t USING (VALUES ('ALGERIA', 'AFRICA')) s(nation_name, region_name) ", targetTable) +
+                    "ON (t.nation_name = s.nation_name) ";
+
+            List<String> sqlMergeCommands = Arrays.asList(
+                    // Mismatched column in the UPDATE statement.
+                    baseMergeSql +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET region_name = 1",
+
+                    // Mismatched column in the INSERT statement.
+                    baseMergeSql +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (region_name) VALUES(1)");
+
+            for (@Language("SQL") String sqlMergeCommand : sqlMergeCommands) {
+                assertQueryFails(sqlMergeCommand,
+                        ".*MERGE table column types don't match for MERGE case 0, SET expressions: Table: \\[varchar\\], Expressions: \\[integer\\]");
+            }
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeWithPartitionSpecEvolutionAddPartitionedField()
+    {
+        String targetTable = "merge_query_" + randomTableSuffix();
+        try {
+            assertUpdate(format("CREATE TABLE %s (a int, b varchar)", targetTable));
+
+            assertUpdate(format("INSERT INTO %s VALUES (1, '1001'), (2, '1002')", targetTable), 2);
+            assertUpdate(format("INSERT INTO %s VALUES (3, '1003'), (4, '1004')", targetTable), 2);
+
+            // Add a partition field to the target iceberg table.
+            assertUpdate(format("ALTER TABLE %s ADD COLUMN c int WITH(partitioning = 'identity')", targetTable));
+
+            assertUpdate(format("INSERT INTO %s VALUES (5, '1005', 5), (6, '1006', 6)", targetTable), 2);
+
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(VALUES (1, 11), (3, 33), (5, 55), (7, 77)) AS s(a, c) " +
+                            "ON (t.a = s.a) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET c = s.c " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (a, b, c) VALUES(s.a, 'NEW_LINE', s.c)";
+
+            assertUpdate(sqlMergeCommand, 4);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES (1, '1001', 11), (2, '1002', NULL), (3, '1003', 33), (4, '1004', NULL), (5, '1005', 55), (6, '1006', 6), (7, 'NEW_LINE', 77)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
+    @Test
+    public void testMergeWithPartitionSpecEvolutionRemovePartitionedField()
+    {
+        String targetTable = "merge_query_" + randomTableSuffix();
+        try {
+            assertUpdate(format("CREATE TABLE %s (a int, b varchar, c int) with(partitioning = ARRAY['a', 'c'])", targetTable));
+            assertUpdate(format("INSERT INTO %s VALUES (1, '1001', 11), (2, '1002', 12)", targetTable), 2);
+
+            // Remove a partitioned field from the target iceberg table.
+            Table icebergTable = loadTable(targetTable);
+            String partitionFieldName = icebergTable.spec().fields().get(0).name();
+            icebergTable.updateSpec().removeField(partitionFieldName).commit();
+
+            assertUpdate(format("INSERT INTO %s VALUES (3, '1003', 13), (4, '1004', 14)", targetTable), 2);
+            @Language("SQL") String sqlMergeCommand =
+                    format("MERGE INTO %s t USING ", targetTable) +
+                            "(VALUES (1, 111), (3, 333), (5, 555)) AS s(a, c) " +
+                            "ON (t.a = s.a) " +
+                            "WHEN MATCHED THEN" +
+                            "    UPDATE SET c = s.c " +
+                            "WHEN NOT MATCHED THEN" +
+                            "    INSERT (a, b, c) VALUES(s.a, 'NEW_LINE', s.c)";
+
+            assertUpdate(sqlMergeCommand, 3);
+
+            assertQuery("SELECT * FROM " + targetTable,
+                    "VALUES (1, '1001', 111), (2, '1002', 12), (3, '1003', 333), (4, '1004', 14), (5, 'NEW_LINE', 555)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + targetTable);
+        }
+    }
+
     private void testCheckDeleteFiles(Table icebergTable, int expectedSize, List<FileContent> expectedFileContent)
     {
         // check delete file list
@@ -2891,14 +4085,14 @@ public abstract class IcebergDistributedTestBase
         test.accept(session, ORC);
     }
 
-    private void assertHasDataFiles(Snapshot snapshot, int dataFilesCount)
+    protected void assertHasDataFiles(Snapshot snapshot, int dataFilesCount)
     {
         Map<String, String> map = snapshot.summary();
         int totalDataFiles = Integer.valueOf(map.get(TOTAL_DATA_FILES_PROP));
         assertEquals(totalDataFiles, dataFilesCount);
     }
 
-    private void assertHasDeleteFiles(Snapshot snapshot, int deleteFilesCount)
+    protected void assertHasDeleteFiles(Snapshot snapshot, int deleteFilesCount)
     {
         Map<String, String> map = snapshot.summary();
         int totalDeleteFiles = Integer.valueOf(map.get(TOTAL_DELETE_FILES_PROP));
