@@ -52,6 +52,7 @@ import com.facebook.presto.sql.planner.iterative.rule.GatherAndMergeWindows;
 import com.facebook.presto.sql.planner.iterative.rule.ImplementBernoulliSampleAsFilter;
 import com.facebook.presto.sql.planner.iterative.rule.ImplementFilteredAggregations;
 import com.facebook.presto.sql.planner.iterative.rule.ImplementOffset;
+import com.facebook.presto.sql.planner.iterative.rule.InlineProjectIntoFilter;
 import com.facebook.presto.sql.planner.iterative.rule.InlineProjections;
 import com.facebook.presto.sql.planner.iterative.rule.InlineProjectionsOnValues;
 import com.facebook.presto.sql.planner.iterative.rule.InlineSqlFunctions;
@@ -97,6 +98,7 @@ import com.facebook.presto.sql.planner.iterative.rule.PullUpExpressionInLambdaRu
 import com.facebook.presto.sql.planner.iterative.rule.PushAggregationThroughOuterJoin;
 import com.facebook.presto.sql.planner.iterative.rule.PushDownDereferences;
 import com.facebook.presto.sql.planner.iterative.rule.PushDownFilterExpressionEvaluationThroughCrossJoin;
+import com.facebook.presto.sql.planner.iterative.rule.PushFilterThroughCountAggregation;
 import com.facebook.presto.sql.planner.iterative.rule.PushLimitThroughMarkDistinct;
 import com.facebook.presto.sql.planner.iterative.rule.PushLimitThroughOffset;
 import com.facebook.presto.sql.planner.iterative.rule.PushLimitThroughOuterJoin;
@@ -147,6 +149,7 @@ import com.facebook.presto.sql.planner.iterative.rule.RuntimeReorderJoinSides;
 import com.facebook.presto.sql.planner.iterative.rule.ScaledWriterRule;
 import com.facebook.presto.sql.planner.iterative.rule.SimplifyCardinalityMap;
 import com.facebook.presto.sql.planner.iterative.rule.SimplifyCountOverConstant;
+import com.facebook.presto.sql.planner.iterative.rule.SimplifyFilterPredicate;
 import com.facebook.presto.sql.planner.iterative.rule.SimplifyRowExpressions;
 import com.facebook.presto.sql.planner.iterative.rule.SimplifySortWithConstantInput;
 import com.facebook.presto.sql.planner.iterative.rule.SimplifyTopNWithConstantInput;
@@ -178,6 +181,7 @@ import com.facebook.presto.sql.planner.optimizations.IndexJoinOptimizer;
 import com.facebook.presto.sql.planner.optimizations.JoinPrefilter;
 import com.facebook.presto.sql.planner.optimizations.KeyBasedSampler;
 import com.facebook.presto.sql.planner.optimizations.LimitPushDown;
+import com.facebook.presto.sql.planner.optimizations.LogPlanTreeOptimizer;
 import com.facebook.presto.sql.planner.optimizations.LogicalCteOptimizer;
 import com.facebook.presto.sql.planner.optimizations.MergeJoinForSortedInputOptimizer;
 import com.facebook.presto.sql.planner.optimizations.MergePartialAggregationsWithFilter;
@@ -899,6 +903,21 @@ public class PlanOptimizers
                         .build()));
 
         builder.add(new RemoveRedundantDistinctAggregation());
+
+        builder.add(new LogPlanTreeOptimizer("--Before new optimizations"));
+        builder.add(new IterativeOptimizer(
+                metadata,
+                ruleStats,
+                statsCalculator,
+                costCalculator,
+                ImmutableSet.<Rule<?>>builder()
+                        .add(new InlineProjectIntoFilter(metadata.getFunctionAndTypeManager()))
+                        .add(new SimplifyFilterPredicate(metadata.getFunctionAndTypeManager()))
+                        .addAll(columnPruningRules)
+                        .add(new InlineProjections(metadata.getFunctionAndTypeManager()))
+                        .addAll(new PushFilterThroughCountAggregation(metadata).rules()) // must run after PredicatePushDown and after TransformFilteringSemiJoinToInnerJoin
+                        .build()));
+        builder.add(new LogPlanTreeOptimizer("--After new optimizations"));
 
         builder.add(
                 new IterativeOptimizer(
