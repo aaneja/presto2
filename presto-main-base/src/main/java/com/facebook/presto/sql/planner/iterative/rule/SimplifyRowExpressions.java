@@ -21,6 +21,7 @@ import com.facebook.presto.expressions.RowExpressionTreeRewriter;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.relation.CallExpression;
+import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.SpecialFormExpression;
 import com.facebook.presto.sql.expressions.ExpressionOptimizerManager;
@@ -99,6 +100,18 @@ public class SimplifyRowExpressions
                 checkState(BooleanType.BOOLEAN.equals(node.getType()), "NOT must be boolean function");
                 return rewriteBooleanExpression(node, isRoot);
             }
+            // Optimize: x = true => x
+            if (functionResolution.isEqualsFunction(node.getFunctionHandle()) && node.getArguments().size() == 2) {
+                RowExpression left = node.getArguments().get(0);
+                RowExpression right = node.getArguments().get(1);
+
+                if (isTrueConstant(left) && BooleanType.BOOLEAN.equals(right.getType())) {
+                    return right;
+                }
+                if (isTrueConstant(right) && BooleanType.BOOLEAN.equals(left.getType())) {
+                    return left;
+                }
+            }
             if (isRoot) {
                 return treeRewriter.rewrite(node, false);
             }
@@ -121,6 +134,13 @@ public class SimplifyRowExpressions
         private boolean isConjunctiveDisjunctive(Form form)
         {
             return form == AND || form == OR;
+        }
+
+        private boolean isTrueConstant(RowExpression expression)
+        {
+            return expression instanceof ConstantExpression
+                    && BooleanType.BOOLEAN.equals(expression.getType())
+                    && Boolean.TRUE.equals(((ConstantExpression) expression).getValue());
         }
 
         private RowExpression rewriteBooleanExpression(RowExpression expression, boolean isRoot)

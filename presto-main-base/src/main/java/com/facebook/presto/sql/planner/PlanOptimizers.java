@@ -181,7 +181,6 @@ import com.facebook.presto.sql.planner.optimizations.IndexJoinOptimizer;
 import com.facebook.presto.sql.planner.optimizations.JoinPrefilter;
 import com.facebook.presto.sql.planner.optimizations.KeyBasedSampler;
 import com.facebook.presto.sql.planner.optimizations.LimitPushDown;
-import com.facebook.presto.sql.planner.optimizations.LogPlanTreeOptimizer;
 import com.facebook.presto.sql.planner.optimizations.LogicalCteOptimizer;
 import com.facebook.presto.sql.planner.optimizations.MergeJoinForSortedInputOptimizer;
 import com.facebook.presto.sql.planner.optimizations.MergePartialAggregationsWithFilter;
@@ -904,7 +903,6 @@ public class PlanOptimizers
 
         builder.add(new RemoveRedundantDistinctAggregation());
 
-        builder.add(new LogPlanTreeOptimizer("--Before new optimizations"));
         builder.add(new IterativeOptimizer(
                 metadata,
                 ruleStats,
@@ -915,9 +913,9 @@ public class PlanOptimizers
                         .add(new SimplifyFilterPredicate(metadata.getFunctionAndTypeManager()))
                         .addAll(columnPruningRules)
                         .add(new InlineProjections(metadata.getFunctionAndTypeManager()))
+                        .addAll(new SimplifyRowExpressions(metadata, expressionOptimizerManager).rules()) // Change expressions like EQUALS(X,true) to X so that domain inference is not broken
                         .addAll(new PushFilterThroughCountAggregation(metadata).rules()) // must run after PredicatePushDown and after TransformFilteringSemiJoinToInnerJoin
                         .build()));
-        builder.add(new LogPlanTreeOptimizer("--After new optimizations"));
 
         builder.add(
                 new IterativeOptimizer(

@@ -61,7 +61,7 @@ import static java.util.Objects.requireNonNull;
  * <p>
  * This rule transforms plans with a FilterNode above an AggregationNode.
  * The AggregationNode must be grouped and contain a single aggregation
- * assignment with {@code count()} function and a mask.
+ * assignment with {@code count()}
  * <p>
  * If the filter predicate is {@code false} for the aggregation's result value {@code 0},
  * then the aggregation's mask can be removed from the aggregation, and
@@ -214,26 +214,26 @@ public class PushFilterThroughCountAggregation
             return Rule.Result.empty();
         }
 
-        // Push down the aggregation's mask.
+        // Push down the aggregation's argument
         FilterNode source = new FilterNode(
                 filterNode.getSourceLocation(),
                 context.getIdAllocator().getNextId(),
                 aggregationNode.getSource(),
-                aggregation.getMask().get());
+                aggregation.getArguments().get(0));
 
-        // Remove mask from the aggregation.
-        Aggregation newAggregation = new Aggregation(
-                aggregation.getCall(),
-                aggregation.getFilter(),
-                aggregation.getOrderBy(),
-                aggregation.isDistinct(),
-                Optional.empty());
+        // // Remove mask from the aggregation.
+        // Aggregation newAggregation = new Aggregation(
+        //         aggregation.getCall(),
+        //         aggregation.getFilter(),
+        //         aggregation.getOrderBy(),
+        //         aggregation.isDistinct(),
+        //         Optional.empty());
 
         AggregationNode newAggregationNode = new AggregationNode(
                 aggregationNode.getSourceLocation(),
                 aggregationNode.getId(),
                 source,
-                ImmutableMap.of(countVariable, newAggregation),
+                ImmutableMap.of(countVariable, aggregation),
                 aggregationNode.getGroupingSets(),
                 aggregationNode.getPreGroupedVariables(),
                 aggregationNode.getStep(),
@@ -293,7 +293,7 @@ public class PushFilterThroughCountAggregation
         }
 
         // Check it's count(*) — no arguments and is the count function
-        return aggregation.getArguments().isEmpty() && functionResolution.isCountFunction(aggregation.getFunctionHandle());
+        return functionResolution.isCountFunction(aggregation.getFunctionHandle());
     }
 
     private static boolean isGroupedAggregation(AggregationNode aggregationNode)

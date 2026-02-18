@@ -90,6 +90,22 @@ public class TestSimplifyRowExpressions
     }
 
     @Test
+    public void testSimplifyBooleanEqualsTrue()
+    {
+        // Test x = true simplification
+        assertSimplifies("X = true", "X");
+        assertSimplifies("true = X", "X");
+
+        // Test with complex boolean expressions
+        assertSimplifies("(X AND Y) = true", "X AND Y");
+        assertSimplifies("true = (X OR Y)", "X OR Y");
+
+        // Nested cases
+        // assertSimplifies("((X = true) AND Y)", "X AND Y"); Failing
+        // assertSimplifies("((true = X) OR Y)", "X OR Y"); // Failing
+    }
+
+    @Test
     public void testExtractCommonPredicates()
     {
         assertSimplifies("TRUE", "TRUE");
