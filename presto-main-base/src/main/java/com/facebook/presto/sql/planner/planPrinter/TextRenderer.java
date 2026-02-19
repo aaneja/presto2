@@ -107,6 +107,18 @@ public class TextRenderer
                 .map(Optional::get)
                 .collect(toList());
 
+        if (children.size() > 1) {
+            // Print a summary of output row count & size per child for better readbility
+            // Very useful for deep Join trees to have a rolled up view
+            for (int i = 0; i < children.size(); i++) {
+                Optional<PlanNodeStats> childStats = children.get(i).getStats();
+                if (!childStats.isPresent()) {
+                    continue;
+                }
+                output.append(indentMultilineString(format("Child[%d] %s", i, getNodeOutputStats("Input", childStats.get())), level + 2));
+            }
+        }
+
         for (NodeRepresentation child : children) {
             writeTextOutput(output, plan, level + 1, child);
         }
@@ -132,7 +144,7 @@ public class TextRenderer
                 nodeStats.getPlanNodeScheduledTime().convertToMostSuccinctTimeUnit(),
                 formatDouble(scheduledTimeFraction)));
 
-        output.append(format(", Output: %s (%s)%n", formatPositions(nodeStats.getPlanNodeOutputPositions()), nodeStats.getPlanNodeOutputDataSize().toString()));
+        output.append(getNodeOutputStats(", Output", nodeStats));
 
         printDistributions(output, nodeStats);
 
@@ -141,6 +153,11 @@ public class TextRenderer
         }
 
         return output.toString();
+    }
+
+    private static String getNodeOutputStats(String prefix, PlanNodeStats nodeStats)
+    {
+        return format("%s: %s (%s)%n", prefix, formatPositions(nodeStats.getPlanNodeOutputPositions()), nodeStats.getPlanNodeOutputDataSize().toString());
     }
 
     private void printDistributions(StringBuilder output, PlanNodeStats stats)
