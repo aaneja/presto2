@@ -51,6 +51,7 @@ import com.facebook.presto.sql.tree.NullLiteral;
 import com.facebook.presto.sql.tree.SymbolReference;
 import com.facebook.presto.type.TypeUtils;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slice;
 import jakarta.inject.Inject;
 
 import java.util.Map;
@@ -172,6 +173,11 @@ public class ScalarStatsCalculator
                 estimate.setLowValue(doubleValue.getAsDouble());
                 estimate.setHighValue(doubleValue.getAsDouble());
             }
+
+            if (literal.getValue() instanceof Slice) {
+                estimate.setAverageRowSize(((Slice) literal.getValue()).length());
+            }
+
             return estimate.build();
         }
 
