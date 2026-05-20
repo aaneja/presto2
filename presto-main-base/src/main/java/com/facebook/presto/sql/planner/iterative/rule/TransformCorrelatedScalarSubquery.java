@@ -165,12 +165,14 @@ public class TransformCorrelatedScalarSubquery
         FilterNode filterNode = new FilterNode(
                 markDistinctNode.getSourceLocation(),
                 context.getIdAllocator().getNextId(),
+                Optional.empty(),
                 markDistinctNode,
                 buildSwitch(
                         isDistinct,
                         ImmutableList.of(specialForm(WHEN, BOOLEAN, TRUE_CONSTANT, TRUE_CONSTANT)),
                         Optional.of(call(CAST.name(), functionAndTypeResolver.lookupCast("CAST", UNKNOWN, BOOLEAN), BOOLEAN, fail)),
-                        BOOLEAN));
+                        BOOLEAN),
+                true);
 //                castToRowExpression(new SimpleCaseExpression(
 //                        createSymbolReference(isDistinct),
 //                        ImmutableList.of(

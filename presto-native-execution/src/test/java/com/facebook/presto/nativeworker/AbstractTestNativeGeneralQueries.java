@@ -1427,6 +1427,9 @@ public abstract class AbstractTestNativeGeneralQueries
 
         // Subquery returns more than one row.
         assertQueryFails("SELECT name FROM nation WHERE regionkey = (SELECT regionkey FROM region)", "(?s).*Expected single row of input. Received 5 rows.*");
+
+        // TODO(https://github.com/prestodb/presto/issues/27709): Correlated scalar subqueries should raise
+        // "multiple rows" error in native execution. Velox currently suppresses it during SWITCH evaluation.
     }
 
     @Test

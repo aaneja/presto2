@@ -439,6 +439,17 @@ public class PredicatePushDown
         @Override
         public PlanNode visitFilter(FilterNode node, RewriteContext<RowExpression> context)
         {
+            if (node.isDoNotMerge()) {
+                PlanNode rewrittenSource = context.rewrite(node.getSource(), TRUE_CONSTANT);
+                PlanNode result = rewrittenSource == node.getSource() ? node :
+                        new FilterNode(node.getSourceLocation(), node.getId(), node.getStatsEquivalentPlanNode(), rewrittenSource, node.getPredicate(), true);
+                if (!context.get().equals(TRUE_CONSTANT)) {
+                    planChanged = true;
+                    result = new FilterNode(node.getSourceLocation(), idAllocator.getNextId(), result, context.get());
+                }
+                return result;
+            }
+
             PlanNode rewrittenPlan = context.rewrite(node.getSource(), logicalRowExpressions.combineConjuncts(node.getPredicate(), context.get()));
             if (!(rewrittenPlan instanceof FilterNode)) {
                 planChanged = true;
