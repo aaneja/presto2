@@ -47,6 +47,16 @@ public final class FilterNode
 
     public FilterNode(
             Optional<SourceLocation> sourceLocation,
+            @JsonProperty("id") PlanNodeId id,
+            @JsonProperty("source") PlanNode source,
+            @JsonProperty("predicate") RowExpression predicate,
+            @JsonProperty("doNotMerge") boolean doNotMerge)
+    {
+        this(sourceLocation, id, Optional.empty(), source, predicate, doNotMerge);
+    }
+
+    public FilterNode(
+            Optional<SourceLocation> sourceLocation,
             PlanNodeId id,
             Optional<PlanNode> statsEquivalentPlanNode,
             PlanNode source,

@@ -357,6 +357,7 @@ public class TransformCorrelatedInPredicateToJoin
         public Optional<Decorrelated> visitFilter(FilterNode node, PlanNode reference)
         {
             Optional<Decorrelated> result = decorrelate(node.getSource());
+            // NOT SURE ABOUT THIS
             return result.map(decorrelated ->
                     new Decorrelated(
                             ImmutableList.<RowExpression>builder()

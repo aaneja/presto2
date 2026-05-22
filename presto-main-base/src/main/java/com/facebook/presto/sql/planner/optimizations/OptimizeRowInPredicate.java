@@ -125,7 +125,7 @@ public class OptimizeRowInPredicate
             // The per-column predicates help the domain translator extract constraints. Applying it
             // elsewhere just adds overhead without benefit.
             RowExpression predicate = node.getPredicate();
-            RowExpression rewritten = isFilterOnScan(rewrittenSource) ? rewritePredicate(predicate) : predicate;
+            RowExpression rewritten = !node.isDoNotMerge() && isFilterOnScan(rewrittenSource) ? rewritePredicate(predicate) : predicate;
 
             if (rewrittenSource == node.getSource() && predicate.equals(rewritten)) {
                 return node;
