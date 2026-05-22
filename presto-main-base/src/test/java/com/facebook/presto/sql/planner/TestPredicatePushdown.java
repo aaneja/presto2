@@ -175,6 +175,30 @@ public class TestPredicatePushdown
     }
 
     @Test
+    public void testFilterNotPushedDownForNonMergeableFilterNode()
+    {
+        assertPlan("SELECT name\n" +
+                        "FROM nation n\n" +
+                        "WHERE 'AFRICA' = (\n" +
+                        "    SELECT name\n" +
+                        "    FROM region\n" +
+                        "    WHERE regionkey > n.regionkey\n" +
+                        ")",
+                anyTree(
+                        semiJoin("LINE_ORDER_KEY", "expr_6", "SEMI_JOIN_RESULT",
+                                anyTree(
+                                        filter("LINE_ORDER_KEY = BIGINT '2'",
+                                                tableScan("lineitem", ImmutableMap.of(
+                                                        "LINE_ORDER_KEY", "orderkey",
+                                                        "LINE_QUANTITY", "quantity")))),
+                                anyTree(
+                                        project(
+                                                ImmutableMap.of("expr_6", expression("2")),
+                                                filter("ORDERS_ORDER_KEY = BIGINT '2'",
+                                                        tableScan("orders", ImmutableMap.of("ORDERS_ORDER_KEY", "orderkey"))))))));
+    }
+
+    @Test
     public void testDomainPredicateFromFilterSidePropagatesToSourceSideOfSemiJoin()
     {
         assertPlan("SELECT quantity FROM (SELECT * FROM lineitem WHERE orderkey IN (SELECT orderkey FROM orders WHERE (orderkey = 2 and comment = 'abc') " +

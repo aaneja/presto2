@@ -58,7 +58,7 @@ public class MergeFilters
     {
         FilterNode child = captures.get(CHILD);
 
-        if (child.isDoNotMerge()) {
+        if (parent.isDoNotMerge() || child.isDoNotMerge()) {
             return Result.empty();
         }
 
