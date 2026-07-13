@@ -71,7 +71,7 @@ Add column ``zip_derived`` to the ``users`` table with derived column expression
 
     ALTER TABLE users ADD COLUMN zip_derived varchar AS upper(zip);
 
-Add column ``zip`` to the ``users`` table if table ``users`` exists and column ``zip`` not already exists::
+Add column ``zip`` to the ``users`` table if table ``users`` exists and column ``zip`` does not already exist::
 
     ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS zip varchar;
 
