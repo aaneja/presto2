@@ -1383,9 +1383,10 @@ public final class IcebergUtil
                 "property %s is not user configurable", DERIVED_COLUMN_EXPRESSION_SPEC);
         List<DerivedColumnSpec> derivedColumnSpecs = tableMetadata.getColumns().stream()
                 .filter(columnMetadata -> columnMetadata.getDerivedColumnSpec().isPresent())
-                .map(columnMetadata -> columnMetadata.getDerivedColumnSpec().get())
-                .map(derivedColumnSpec ->
-                        DerivedColumnSpec.buildFrom(derivedColumnSpec).setDerivedColumnFieldId(schema.findField(derivedColumnSpec.getDerivedColumnName()).fieldId()).build())
+                .map(columnMetadata -> DerivedColumnSpec.buildFrom(columnMetadata.getDerivedColumnSpec().get())
+                        .setDerivedColumnFieldId(schema.findField(columnMetadata.getName()).fieldId())
+                        .setDerivedColumnReturnType(columnMetadata.getType().getTypeSignature().toString())
+                        .build())
                 .collect(toImmutableList());
 
         DerivedColumnSpecList derivedColumnSpecList = new DerivedColumnSpecList(derivedColumnSpecs);

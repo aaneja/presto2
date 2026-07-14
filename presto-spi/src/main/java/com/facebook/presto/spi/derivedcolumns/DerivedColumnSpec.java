@@ -47,13 +47,13 @@ public class DerivedColumnSpec
             @JsonProperty("derivedColumnType") DerivedColumnType derivedColumnType,
             @JsonProperty("derivedColumnExpression") String derivedColumnExpression,
             @JsonProperty("derivedColumnName") String derivedColumnName,
-            @JsonProperty("derivedColumnFieldId") Integer derivedColumnFieldId,
+            @JsonProperty("derivedColumnFieldId") int derivedColumnFieldId,
             @JsonProperty("derivedColumnReturnType") String derivedColumnReturnType)
     {
         this.derivedColumnType = requireNonNull(derivedColumnType, "derivedColumnType is null");
         this.derivedColumnExpression = requireNonNull(derivedColumnExpression, "derivedColumnExpression is null");
         this.derivedColumnName = requireNonNull(derivedColumnName, "derivedColumnName is null");
-        this.derivedColumnFieldId = requireNonNull(derivedColumnFieldId, "derivedColumnFieldId is null");
+        this.derivedColumnFieldId = derivedColumnFieldId;
         this.derivedColumnReturnType = requireNonNull(derivedColumnReturnType, "derivedColumnReturnType is null");
     }
 
@@ -142,7 +142,7 @@ public class DerivedColumnSpec
         private DerivedColumnType derivedColumnType;
         private String derivedColumnExpression;
         private String derivedColumnName;
-        private Integer derivedColumnFieldId;
+        private int derivedColumnFieldId = -1;
         private String derivedColumnReturnType;
 
         public Builder setDerivedColumnName(String derivedColumnName)
@@ -163,7 +163,7 @@ public class DerivedColumnSpec
             return this;
         }
 
-        public Builder setDerivedColumnFieldId(Integer derivedColumnFieldId)
+        public Builder setDerivedColumnFieldId(int derivedColumnFieldId)
         {
             this.derivedColumnFieldId = derivedColumnFieldId;
             return this;
@@ -178,7 +178,6 @@ public class DerivedColumnSpec
         public DerivedColumnSpec build()
         {
             requireNonNull(derivedColumnReturnType, "derivedColumnReturnType is null");
-            requireNonNull(derivedColumnFieldId, "derivedColumnFieldId is null");
             requireNonNull(derivedColumnType, "derivedColumnType is null");
             requireNonNull(derivedColumnName, "derivedColumnName is null");
             requireNonNull(derivedColumnExpression, "derivedColumnExpression is null");
