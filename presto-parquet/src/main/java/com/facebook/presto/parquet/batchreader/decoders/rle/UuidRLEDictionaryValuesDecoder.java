@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.InputStream;
 
 import static com.facebook.presto.parquet.batchreader.BytesUtils.getLongBigEndian;
+import static java.lang.Long.reverseBytes;
 import static java.util.Objects.requireNonNull;
 
 public class UuidRLEDictionaryValuesDecoder
@@ -48,8 +49,11 @@ public class UuidRLEDictionaryValuesDecoder
 
         for (int i = 0; i < length; i++) {
             int positionOffset = offsets[i];
-            values[(i + offset) * 2] = getLongBigEndian(byteBuffer, positionOffset);
-            values[((i + offset) * 2) + 1] = getLongBigEndian(byteBuffer, positionOffset + Long.BYTES);
+            // The 16 bytes on disk are the canonical big-endian UUID, so getLongBigEndian yields the true
+            // most/least significant bits. values backs an Int128ArrayBlock of UUIDs, which stores each half
+            // byte-reversed instead - see the class javadoc on com.facebook.presto.common.type.UuidType.
+            values[(i + offset) * 2] = reverseBytes(getLongBigEndian(byteBuffer, positionOffset));
+            values[((i + offset) * 2) + 1] = reverseBytes(getLongBigEndian(byteBuffer, positionOffset + Long.BYTES));
         }
     }
 

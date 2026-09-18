@@ -18,6 +18,7 @@ import org.apache.parquet.column.values.ValuesReader;
 import org.openjdk.jol.info.ClassLayout;
 
 import static com.facebook.presto.parquet.batchreader.BytesUtils.getLongBigEndian;
+import static java.lang.Long.reverseBytes;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -43,8 +44,11 @@ public class FixedLenByteArrayUuidDeltaValuesDecoder
         int endOffset = (offset + length) * 2;
         for (int currentOutputOffset = offset * 2; currentOutputOffset < endOffset; currentOutputOffset += 2) {
             byte[] inputBytes = delegate.readBytes().getBytes();
-            values[currentOutputOffset] = getLongBigEndian(inputBytes, 0);
-            values[currentOutputOffset + 1] = getLongBigEndian(inputBytes, Long.BYTES);
+            // The 16 bytes on disk are the canonical big-endian UUID, so getLongBigEndian yields the true
+            // most/least significant bits. values backs an Int128ArrayBlock of UUIDs, which stores each half
+            // byte-reversed instead - see the class javadoc on com.facebook.presto.common.type.UuidType.
+            values[currentOutputOffset] = reverseBytes(getLongBigEndian(inputBytes, 0));
+            values[currentOutputOffset + 1] = reverseBytes(getLongBigEndian(inputBytes, Long.BYTES));
         }
     }
 

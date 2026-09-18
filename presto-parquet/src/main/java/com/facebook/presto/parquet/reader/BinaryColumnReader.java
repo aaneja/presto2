@@ -27,6 +27,7 @@ import static com.facebook.presto.common.type.Varchars.truncateToLength;
 import static com.facebook.presto.parquet.batchreader.BytesUtils.getLongBigEndian;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.lang.Long.reverseBytes;
 
 public class BinaryColumnReader
         extends AbstractColumnReader
@@ -44,9 +45,13 @@ public class BinaryColumnReader
             Slice value;
 
             if (type instanceof UuidType) {
+                // The 16 bytes on disk are the canonical big-endian UUID, most significant byte first, so
+                // getLongBigEndian yields the true most/least significant bits. A UUID block stores each half
+                // byte-reversed instead - see the class javadoc on com.facebook.presto.common.type.UuidType -
+                // hence reverseBytes. Keep this in sync with UuidValuesWriter and the batch UUID decoders.
                 byte[] src = binary.getBytes();
-                blockBuilder.writeLong(getLongBigEndian(src, 0));
-                blockBuilder.writeLong(getLongBigEndian(src, Long.BYTES));
+                blockBuilder.writeLong(reverseBytes(getLongBigEndian(src, 0)));
+                blockBuilder.writeLong(reverseBytes(getLongBigEndian(src, Long.BYTES)));
                 blockBuilder.closeEntry();
                 return;
             }

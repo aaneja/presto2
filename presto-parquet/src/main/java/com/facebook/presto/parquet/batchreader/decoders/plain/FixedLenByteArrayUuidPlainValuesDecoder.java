@@ -20,6 +20,7 @@ import java.nio.ByteBuffer;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.slice.SizeOf.sizeOf;
+import static java.lang.Long.reverseBytes;
 import static java.nio.ByteOrder.BIG_ENDIAN;
 
 public class FixedLenByteArrayUuidPlainValuesDecoder
@@ -51,8 +52,12 @@ public class FixedLenByteArrayUuidPlainValuesDecoder
         int readEndOffset = (offset + length) * 2;
 
         for (int currentOutputOffset = offset * 2; currentOutputOffset < readEndOffset; currentOutputOffset += 2) {
-            values[currentOutputOffset] = buffer.getLong();
-            values[currentOutputOffset + 1] = buffer.getLong();
+            // buffer is BIG_ENDIAN and the 16 bytes on disk are the canonical big-endian UUID, so getLong
+            // yields the true most/least significant bits. values backs an Int128ArrayBlock of UUIDs, which
+            // stores each half byte-reversed instead - see the class javadoc on
+            // com.facebook.presto.common.type.UuidType - hence reverseBytes.
+            values[currentOutputOffset] = reverseBytes(buffer.getLong());
+            values[currentOutputOffset + 1] = reverseBytes(buffer.getLong());
         }
     }
 

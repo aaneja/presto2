@@ -859,14 +859,10 @@ public abstract class TestValuesDecoders
         int valueCount = 2048;
         List<Object> expectedValues = new ArrayList<>();
 
+        // generatePlainValuesPage writes each 16 byte value as two little-endian longs. The decoder reads them
+        // as a canonical big-endian UUID and converts to the byte-reversed halves a UUID block holds (see the
+        // class javadoc on UuidType), so the two reversals cancel and the values read back unchanged.
         byte[] pageBytes = generatePlainValuesPage(valueCount, 128, expectedValues);
-        // page is read assuming in big endian, so we need to flip the bytes around when comparing read values
-        expectedValues = expectedValues.stream()
-                .map(Long.class::cast)
-                .mapToLong(Long::longValue)
-                .map(Long::reverseBytes)
-                .boxed()
-                .collect(toImmutableList());
         uuidBatchReadWithSkipHelper(valueCount, 0, valueCount, uuidPlain(pageBytes), expectedValues);
         uuidBatchReadWithSkipHelper(29, 0, valueCount, uuidPlain(pageBytes), expectedValues);
         uuidBatchReadWithSkipHelper(89, 0, valueCount, uuidPlain(pageBytes), expectedValues);
@@ -889,18 +885,14 @@ public abstract class TestValuesDecoders
         byte[] dictionaryPage = generatePlainValuesPage(dictionarySize, 128, dictionary);
         byte[] dataPage = generateDictionaryIdPage2048(dictionarySize - 1, dictionaryIds);
 
+        // the dictionary page holds each 16 byte value as two little-endian longs, and the decoder reads them
+        // as a canonical big-endian UUID before converting to the byte-reversed halves a UUID block holds
+        // (see the class javadoc on UuidType), so the two reversals cancel
         List<Object> expectedValues = new ArrayList<>();
         for (Integer dictionaryId : dictionaryIds) {
             expectedValues.add(dictionary.get(dictionaryId * 2));
             expectedValues.add(dictionary.get((dictionaryId * 2) + 1));
         }
-
-        expectedValues = expectedValues.stream()
-                .map(Long.class::cast)
-                .mapToLong(Long::longValue)
-                .map(Long::reverseBytes)
-                .boxed()
-                .collect(toImmutableList());
 
         BinaryBatchDictionary binaryDictionary = new BinaryBatchDictionary(new DictionaryPage(Slices.wrappedBuffer(dictionaryPage), dictionarySize, PLAIN_DICTIONARY), 16);
         uuidBatchReadWithSkipHelper(valueCount, 0, valueCount, uuidRle(dataPage, dictionarySize, binaryDictionary), expectedValues);
