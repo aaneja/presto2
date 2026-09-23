@@ -32,6 +32,7 @@ import com.facebook.presto.sql.planner.iterative.properties.LogicalPropertiesPro
 import com.facebook.presto.sql.planner.iterative.rule.AddDistinctForSemiJoinBuild;
 import com.facebook.presto.sql.planner.iterative.rule.AddExchangesBelowPartialAggregationOverGroupIdRuleSet;
 import com.facebook.presto.sql.planner.iterative.rule.AddIntermediateAggregations;
+import com.facebook.presto.sql.planner.iterative.rule.AddLocalExchangeForDoublePartialAggregation;
 import com.facebook.presto.sql.planner.iterative.rule.AddNotNullFiltersToJoinNode;
 import com.facebook.presto.sql.planner.iterative.rule.CoalesceCascadingProjections;
 import com.facebook.presto.sql.planner.iterative.rule.CollapseFanoutJoinWithArrayAggUnnest;
@@ -1215,6 +1216,15 @@ public class PlanOptimizers
                 statsCalculator,
                 costCalculator,
                 new AddExchangesBelowPartialAggregationOverGroupIdRuleSet(taskCountEstimator, taskManagerConfig, metadata, featuresConfig.isNativeExecutionEnabled()).rules()));
+
+        // Experimental, not cost-based: gated behind experimental_double_partial_aggregation.
+        builder.add(new IterativeOptimizer(
+                metadata,
+                ruleStats,
+                statsCalculator,
+                costCalculator,
+                ImmutableSet.of(
+                        new AddLocalExchangeForDoublePartialAggregation(metadata.getFunctionAndTypeManager()))));
 
         builder.add(new IterativeOptimizer(
                 metadata,

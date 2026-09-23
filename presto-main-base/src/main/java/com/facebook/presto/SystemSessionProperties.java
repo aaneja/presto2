@@ -395,6 +395,7 @@ public final class SystemSessionProperties
     public static final String BROADCAST_SEMI_JOIN_FOR_DELETE = "broadcast_semi_join_for_delete";
     public static final String EXPRESSION_OPTIMIZER_NAME = "expression_optimizer_name";
     public static final String ADD_EXCHANGE_BELOW_PARTIAL_AGGREGATION_OVER_GROUP_ID = "add_exchange_below_partial_aggregation_over_group_id";
+    public static final String DOUBLE_PARTIAL_AGGREGATION = "experimental_double_partial_aggregation";
     public static final String QUERY_CLIENT_TIMEOUT = "query_client_timeout";
     public static final String REWRITE_MIN_MAX_BY_TO_TOP_N = "rewrite_min_max_by_to_top_n";
     public static final String ADD_DISTINCT_BELOW_SEMI_JOIN_BUILD = "add_distinct_below_semi_join_build";
@@ -2379,6 +2380,10 @@ public final class SystemSessionProperties
                         "Enable adding an exchange below partial aggregation over a GroupId node to improve partial aggregation performance",
                         featuresConfig.getAddExchangeBelowPartialAggregationOverGroupId(),
                         false),
+                booleanProperty(DOUBLE_PARTIAL_AGGREGATION,
+                        "Experimental, not cost-based: locally repartition a partial aggregation's input by its grouping keys and run a second (intermediate) aggregation stage before the exchange",
+                        false,
+                        false),
                 booleanProperty(
                         OPTIMIZE_CONDITIONAL_CONSTANT_APPROXIMATE_DISTINCT,
                         "Optimize out APPROX_DISTINCT operations over constant conditionals",
@@ -4154,6 +4159,11 @@ public final class SystemSessionProperties
     public static boolean isEnabledAddExchangeBelowGroupId(Session session)
     {
         return session.getSystemProperty(ADD_EXCHANGE_BELOW_PARTIAL_AGGREGATION_OVER_GROUP_ID, Boolean.class);
+    }
+
+    public static boolean isDoublePartialAggregationEnabled(Session session)
+    {
+        return session.getSystemProperty(DOUBLE_PARTIAL_AGGREGATION, Boolean.class);
     }
 
     public static boolean isPushSubfieldsForMapFunctionsEnabled(Session session)
