@@ -20,8 +20,6 @@ import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.spi.function.AggregationFunctionImplementation;
 import com.facebook.presto.spi.function.FunctionHandle;
 import com.facebook.presto.spi.plan.AggregationNode;
-import com.facebook.presto.spi.plan.Partitioning;
-import com.facebook.presto.spi.plan.PartitioningScheme;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
@@ -35,9 +33,8 @@ import java.util.Optional;
 import static com.facebook.presto.SystemSessionProperties.isDoublePartialAggregationEnabled;
 import static com.facebook.presto.matching.Pattern.typeOf;
 import static com.facebook.presto.spi.plan.AggregationNode.Step.PARTIAL;
-import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.plan.ExchangeNode.Scope.LOCAL;
-import static com.facebook.presto.sql.planner.plan.ExchangeNode.partitionedExchange;
+import static com.facebook.presto.sql.planner.plan.ExchangeNode.gatheringExchange;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -55,15 +52,16 @@ import static java.util.Objects.requireNonNull;
  *   - RemoteExchange
  *     - [ Projection ]
  *       - Aggregation (INTERMEDIATE)
- *         - LocalExchange (hash-partitioned on the grouping keys)
+ *         - LocalExchange (GATHER, N:1)
  *           - Partial Aggregation
  * </pre>
  * <p>
  * Rationale: a partial aggregation running independently on every driver only ever sees a
  * random slice of the full key space, so for high-cardinality grouping keys it barely reduces
- * row count before the shuffle. Redistributing rows locally by grouping key first, then running
- * a second aggregation stage, lets each local partition see the full local key domain instead of
- * a random sample of it.
+ * row count before the shuffle. Gathering every driver's partial output into a single stream
+ * and running a second aggregation stage over it lets that stage see the task's entire local key
+ * domain instead of a random per-driver sample, at the cost of collapsing this stage down to a
+ * single driver.
  */
 public class AddLocalExchangeForDoublePartialAggregation
         implements Rule<AggregationNode>
@@ -142,13 +140,10 @@ public class AddLocalExchangeForDoublePartialAggregation
                 node.getGroupIdVariable(),
                 Optional.of(SYNTHETIC_AGGREGATION_ID));
 
-        PlanNode localExchange = partitionedExchange(
+        PlanNode localExchange = gatheringExchange(
                 context.getIdAllocator().getNextId(),
                 LOCAL,
-                innerAggregation,
-                new PartitioningScheme(
-                        Partitioning.create(FIXED_HASH_DISTRIBUTION, node.getGroupingKeys()),
-                        innerAggregation.getOutputVariables()));
+                innerAggregation);
 
         PlanNode outerAggregation = new AggregationNode(
                 node.getSourceLocation(),
